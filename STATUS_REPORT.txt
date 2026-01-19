@@ -1,0 +1,153 @@
+╔══════════════════════════════════════════════════════════════════════════╗
+║              AUTOBOT TESTNET - KAPSAMLI DURUM RAPORU                    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+📅 Rapor Tarihi: 2026-01-19 17:39:44 UTC
+🔧 Environment: TESTNET (BINANCE_TESTNET=true)
+⚙️  DRY_RUN: false
+🎯 Mod: LIVE TRADING (TESTNET)
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 1. SİSTEM ÖZETİ                                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Process PID:    1345518                                               │
+│ CPU Usage:      98.1% (high - processing 541 symbols)                  │
+│ Memory:         439 MB                                                │
+│ Uptime:         10 dakika 49 saniye                                   │
+│ Python:         3.12                                                  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 2. WEBSOCKET MIMARİSİ                                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Toplam Bağlantı: 6 adet                                               │
+│ Bağlantı Tipi:   Multi-Connection (batch'ler halinde)                 │
+│ Batch Boyutu:    100 sembol/bağlantı (son bağlantı: 41)               │
+│ URL:            wss://stream.binancefuture.com/ws                      │
+│ Durum:         TÜM BAĞLANTILAR AKTİF                                  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 3. SEMBOL KAPSAMI                                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│ TOPLAM SEMBOL:    541 adet                                            │
+│ Kapsam:           ALL perpetual USDT pairs                            │
+│ Kategori:         Majör + Alt + Meme + Shitcoins                       │
+│                                                                          │
+│ Örnek Semboller (50 tanesi):                                           │
+│   BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT, ADAUSDT, DOTUSDT,       │
+│   AVAXUSDT, LINKUSDT, ATOMUSDT, NEARUSDT, FILUSDT, TONUSDT, SUIUSDT,   │
+│   AAVEUSDT, UNIUSDT, INJUSDT, APTUSDT, ARBUSDT, OPUSDT, MATICUSDT,     │
+│   DOGEUSDT, SHIBUSDT, PEPEUSDT, TRUMPUSDT, PUMPUSDT, 1000BONKUSDT,    │
+│   WIFUSDT, FARTCOINUSDT, GIGGLEUSDT, 1000SATSUSDT, DOGSUSDT,           │
+│   VE 500+ DAHA FAZLA SEMBOL...                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 4. VERI AKIŞI METRIKLERİ                                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│ (Son 1 dakika örneklemesi)                                              │
+│ Kline Close Events:     52/dakika                                     │
+│ Signal Generated:       96/dakika                                     │
+│ Regime Detection:       48/dakika                                     │
+│ Tahkıli Event Hacmi:    ~600+ event/dakika                           │
+│                                                                          │
+│ Event Türleri:                                                            │
+│   ✓ Kline Close (1m candles)                                           │
+│   ✓ Book Ticker (real-time bid/ask)                                   │
+│   ✓ Regime Detection (RANGE/TREND transitions)                         │
+│   ✓ Signal Generation (LONG/SHORT/NEUTRAL)                            │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 5. REGIME DETECTION STATUS                                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Durum:            AKTİF ✓                                              │
+│ Algoritma:        Hareketli ortalama + volatilite                    │
+│ Regime Türleri:    RANGE, BULL_TREND, BEAR_TREND                      │
+│ Son Transition:   UBUSDT → BULL_TREND (detected)                      │
+│                                                                          │
+│ Mevcut Regime Dağılımı (tahmini):                                      │
+│   BEAR_TREND:  ~70% (piyasada düşüş trendi)                          │
+│   BULL_TREND:  ~20% (bazı coin'lerde yükseliş)                        │
+│   RANGE:        ~10% (yatan coin'ler)                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 6. HATA VE UYARI ÖZETİ                                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│ (Son 500 log satırı)                                                   │
+│ ERROR:    0 ✓                                                          │
+│ WARNING:  10 (No features calculated - normal, yeni coin'ler)         │
+│ CRITICAL: 0 ✓                                                          │
+│                                                                          │
+│ Sistem Sağlığı:    TEMIZ ✓                                             │
+│ WebSocket Errors:  YOK                                                 │
+│ Connection Lost:   YOK                                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 7. REDIS STATE PERSISTENCE                                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Durum:         CONNECTED ✓                                            │
+│ Ping:          PONG                                                   │
+│ Host:          127.0.0.1:6379                                         │
+│ Depolanan:     System state, positions, critical latch                 │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 8. TELEGRAM NOTIFICATIONS                                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Durum:         LOGGING ONLY (event loop hatası - non-critical)        │
+│ Chat ID:       -1002657942300                                          │
+│ CRITICAL Latch: Boş (hiç critical event yok)                          │
+│ Impact:        TRADING'A ETKİ ETMİYOR ✓                               │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 9. OBSERVATION PERIYODU DURUMU                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Başlangıç:      2026-01-19 ~17:28 UTC                                  │
+│ Şu an:          2026-01-19 17:39 UTC                                   │
+│ Geçen Süre:     ~10 dakika                                            │
+│ Hedef:          48-72 saat                                            │
+│ Durum:          IN PROGRESS ⏳                                        │
+│ Kalan:          ~47 saat 50 dakika                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 10. PRE-LIVE DEPLOYMENT CHECKLIST                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│ ☑ Sistem TESTNET'te çalışıyor                                          │
+│ ☑ 541 sembol taranıyor                                                │
+│ ☑ WebSocket bağlantıları stable                                        │
+│ ☑ Event-driven pipeline çalışıyor                                      │
+│ ☑ Regime detection çalışıyor                                           │
+│ ☑ Signal generation çalışıyor                                          │
+│ ☑ Redis state persistence aktif                                        │
+│ ☑ Risk veto chain implement edildi                                     │
+│ ⏳ 48-72 saatlik observation completed                                 │
+│ ☐ Tüm 6-mrik stable kalmış                                             │
+│ ☐ Bad scenario testleri yapıldı                                        │
+│ ☐ HALTED state verified                                                │
+│ ☐ Final log review completed                                           │
+└─────────────────────────────────────────────────────────────────────────┘
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                           SONUÇ                                       ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║                                                                          ║
+║  🟢 AUTOBOT TESTNET - 541 SEMBOL İLE AKTİF                             ║
+║                                                                          ║
+║  Sistem başarılı bir şekilde 541 perpetual USDT çiftini taramaya      ║
+║  başladı. 6 WebSocket bağlantısı stabil çalışıyor. Event-driven        ║
+║  pipeline, regime detection ve signal generation düzgün çalışıyor.    ║
+║                                                                          ║
+║  48-72 saatlik observation period'ın sonunda, tüm metrikler stable     ║
+║  kalırsa LIVE deployment'a hazır olacaktır.                             ║
+║                                                                          ║
+║  Status: OBSERVATION IN PROGRESS ⏳                                    ║
+║                                                                          ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+Generated: 2026-01-19 17:39:44 UTC

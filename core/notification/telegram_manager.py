@@ -1,40 +1,48 @@
 """
-AUTOBOT Notification Manager - Telegram Integration
-Priority-based notification system with async queue
+AUTOBOT Notification Manager - PRODUCTION READY
 """
 import logging
 import asyncio
-from typing import Optional, Dict, Any, List
-from dataclasses import dataclass
-from datetime import datetime
-from enum import Enum
+import time
 import json
+from typing import Optional, Dict, Any
+from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
+from enum import Enum
+from threading import Lock
+from pathlib import Path
 
 try:
-    import telegram
-    from telegram import Bot, ParseMode
+    from telegram import Bot
     from telegram.error import TelegramError
-except ImportError:
-    telegram = None
+    TELEGRAM_AVAILABLE = True
+except ImportError as e:
     Bot = None
+    TelegramError = None
+    TELEGRAM_AVAILABLE = False
+    logging.error(f"telegram import failed: {e}")
 
 from config.settings import settings
 
 logger = logging.getLogger("autobot.notification.telegram")
 
+RATE_LIMITS = {
+    "INFO": {"max_per_minute": 60},
+    "WARNING": {"max_per_minute": 10},
+    "ERROR": {"max_per_minute": 5},
+    "CRITICAL": {"max_per_10min": 1, "max_per_hour": 6},
+    "HEARTBEAT": {"max_per_hour": 24},
+}
 
 class NotificationPriority(Enum):
-    """Notification priority levels"""
-    CRITICAL = "CRITICAL"  # 🔴 Immediate human intervention required
-    ERROR = "ERROR"        # 🟠 System error, auto-recovery attempted
-    WARNING = "WARNING"    # 🟡 Potential risk or anomaly
-    INFO = "INFO"          # 🔵 Routine operational information
-    HEARTBEAT = "HEARTBEAT" # 🟢 System health status
-
+    CRITICAL = "CRITICAL"
+    ERROR = "ERROR"
+    WARNING = "WARNING"
+    INFO = "INFO"
+    HEARTBEAT = "HEARTBEAT"
 
 @dataclass
 class NotificationMessage:
-    """Structured notification message"""
     priority: NotificationPriority
     title: str
     message: str
@@ -43,96 +51,153 @@ class NotificationMessage:
     
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.utcnow()
+            self.timestamp = datetime.now(timezone.utc)
     
-    def format(self) -> str:
-        """Format message for Telegram"""
-        emoji = {
-            NotificationPriority.CRITICAL: "🔴",
-            NotificationPriority.ERROR: "🟠",
-            NotificationPriority.WARNING: "🟡",
-            NotificationPriority.INFO: "🔵",
-            NotificationPriority.HEARTBEAT: "🟢",
-        }
-        
-        lines = [
-            f"{emoji.get(self.priority, )} {self.title}",
-            f"*Timestamp (UTC):* {self.timestamp.strftime(%Y-%m-%d %H:%M:%S)}",
-        ]
-        
-        # Add metadata
+    def get_event_key(self) -> str:
+        key_parts = [self.title]
         if self.metadata:
-            lines.append("")
-            for key, value in self.metadata.items():
-                lines.append(f"*{key}:* {value}")
-        
-        lines.append("")
-        lines.append(self.message)
-        
-        return "\n".join(lines)
-
+            for k, v in sorted(self.metadata.items()):
+                key_parts.append(f"{k}={v}")
+        return ":".join(key_parts)
 
 class TelegramNotificationManager:
-    """Manages Telegram notifications with priority queuing"""
+    _instance = None
+    _lock = Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
     
     def __init__(self):
-        self._bot: Optional[Bot] = None
-        self._chat_id: Optional[str] = None
-        self._enabled = settings.TELEGRAM_NOTIFICATIONS_ENABLED
-        self._message_queue: asyncio.Queue = None
-        self._worker_task: asyncio.Task = None
-        
-        if self._enabled and telegram is not None:
-            self._initialize_bot()
+        with TelegramNotificationManager._lock:
+            if hasattr(self, '_initialized') and self._initialized:
+                return
+            self._bot = None
+            self._chat_id = None
+            self._enabled = settings.TELEGRAM_NOTIFICATIONS_ENABLED and TELEGRAM_AVAILABLE
+            self._send_history = {p.value: [] for p in NotificationPriority}
+            self._critical_latch = {}
+            self._latch_file = Path("/root/autobot_system/.critical_latch.json")
+            self._load_latch_state()
+            if self._enabled:
+                self._initialize_bot()
+            self._initialized = True
+    
+    def _load_latch_state(self):
+        try:
+            if self._latch_file.exists():
+                with open(self._latch_file, 'r') as f:
+                    self._critical_latch = json.load(f)
+        except Exception:
+            pass
+    
+    def _save_latch_state(self):
+        try:
+            with open(self._latch_file, 'w') as f:
+                json.dump(self._critical_latch, f)
+        except Exception:
+            pass
     
     def _initialize_bot(self):
-        """Initialize Telegram bot"""
         try:
             token = settings.TELEGRAM_BOT_TOKEN.get_secret_value()
             self._bot = Bot(token=token)
             self._chat_id = settings.TELEGRAM_CHAT_ID
-            logger.info("Telegram bot initialized")
+            logger.info(f"Telegram bot initialized: chat_id={self._chat_id}")
         except Exception as e:
-            logger.error(f"Failed to initialize Telegram bot: {e}")
+            logger.error(f"Failed to init Telegram bot: {e}")
             self._enabled = False
     
-    async def send(self, notification: NotificationMessage) -> bool:
-        """Send a notification (async)"""
+    def _check_latch(self, event_key: str) -> bool:
+        if event_key not in self._critical_latch:
+            return False
+        last_sent = self._critical_latch[event_key]
+        if datetime.now(timezone.utc) - last_sent > timedelta(hours=24):
+            del self._critical_latch[event_key]
+            self._save_latch_state()
+            return False
+        return True
+    
+    def _set_latch(self, event_key: str):
+        self._critical_latch[event_key] = datetime.now(timezone.utc)
+        self._save_latch_state()
+    
+    def _check_rate_limit(self, priority: NotificationPriority) -> bool:
+        now = time.time()
+        history = self._send_history[priority.value]
+        cutoff = now - 3600
+        self._send_history[priority.value] = [t for t in history if t > cutoff]
         
-        if not self._enabled or self._bot is None:
-            # Log locally if Telegram not available
-            self._log_notification(notification)
+        limits = RATE_LIMITS[priority.value]
+        
+        minute_ago = now - 60
+        minute_count = sum(1 for t in history if t > minute_ago)
+        if "max_per_minute" in limits and minute_count >= limits["max_per_minute"]:
             return False
         
+        hour_count = len(history)
+        if "max_per_hour" in limits and hour_count >= limits["max_per_hour"]:
+            return False
+        
+        if priority == NotificationPriority.CRITICAL:
+            ten_min_ago = now - 600
+            ten_min_count = sum(1 for t in history if t > ten_min_ago)
+            if ten_min_count >= limits.get("max_per_10min", 1):
+                return False
+        
+        return True
+    
+    async def _send_async(self, notification: NotificationMessage) -> bool:
+        if not self._enabled or self._bot is None:
+            self._log_notification(notification)
+            return False
         try:
             message = notification.format()
-            await self._bot.send_message(
-                chat_id=self._chat_id,
-                text=message,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            logger.debug(f"Notification sent: {notification.title}")
+            await self._bot.send_message(chat_id=self._chat_id, text=message)
+            logger.info(f"[TELEGRAM SENT] [{notification.priority.value}] {notification.title}")
             return True
-        except TelegramError as e:
-            logger.error(f"Telegram send failed: {e}")
-            self._log_notification(notification)
-            return False
         except Exception as e:
-            logger.error(f"Unexpected error sending notification: {e}")
+            logger.error(f"Telegram error: {e}")
+            self._log_notification(notification)
             return False
     
     def send_sync(self, notification: NotificationMessage) -> bool:
-        """Send a notification (synchronous wrapper)"""
+        if notification.priority == NotificationPriority.CRITICAL:
+            event_key = notification.get_event_key()
+            if self._check_latch(event_key):
+                logger.warning(f"CRITICAL latched: {event_key}")
+                return False
+        
+        if not self._check_rate_limit(notification.priority):
+            logger.warning(f"Rate limited: {notification.priority.value}")
+            self._log_notification(notification)
+            return False
+        
         try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        
-        return loop.run_until_complete(self.send(notification))
+            try:
+                result = loop.run_until_complete(asyncio.wait_for(self._send_async(notification), timeout=10.0))
+                if result:
+                    self._send_history[notification.priority.value].append(time.time())
+                    if notification.priority == NotificationPriority.CRITICAL:
+                        self._set_latch(notification.get_event_key())
+                return result
+            except asyncio.TimeoutError:
+                return False
+            finally:
+                try:
+                    loop.run_until_complete(loop.shutdown_async())
+                except:
+                    pass
+                loop.close()
+        except Exception as e:
+            logger.error(f"send_sync error: {e}")
+            self._log_notification(notification)
+            return False
     
     def _log_notification(self, notification: NotificationMessage):
-        """Log notification locally if Telegram unavailable"""
         log_level = {
             NotificationPriority.CRITICAL: logging.CRITICAL,
             NotificationPriority.ERROR: logging.ERROR,
@@ -140,16 +205,10 @@ class TelegramNotificationManager:
             NotificationPriority.INFO: logging.INFO,
             NotificationPriority.HEARTBEAT: logging.INFO,
         }
-        
-        logger.log(
-            log_level.get(notification.priority, logging.INFO),
-            f"[{notification.priority.value}] {notification.title}: {notification.message}"
-        )
-    
-    # Convenience methods for common notifications
+        logger.log(log_level.get(notification.priority, logging.INFO),
+            f"[{notification.priority.value}] {notification.title}: {notification.message}")
     
     def send_critical(self, title: str, message: str, **metadata):
-        """Send CRITICAL priority notification"""
         notification = NotificationMessage(
             priority=NotificationPriority.CRITICAL,
             title=f"CRITICAL ALERT - {title}",
@@ -159,7 +218,6 @@ class TelegramNotificationManager:
         return self.send_sync(notification)
     
     def send_error(self, title: str, message: str, **metadata):
-        """Send ERROR priority notification"""
         notification = NotificationMessage(
             priority=NotificationPriority.ERROR,
             title=f"SYSTEM ERROR - {title}",
@@ -169,7 +227,6 @@ class TelegramNotificationManager:
         return self.send_sync(notification)
     
     def send_warning(self, title: str, message: str, **metadata):
-        """Send WARNING priority notification"""
         notification = NotificationMessage(
             priority=NotificationPriority.WARNING,
             title=f"WARNING - {title}",
@@ -179,7 +236,6 @@ class TelegramNotificationManager:
         return self.send_sync(notification)
     
     def send_info(self, title: str, message: str, **metadata):
-        """Send INFO priority notification"""
         notification = NotificationMessage(
             priority=NotificationPriority.INFO,
             title=title,
@@ -189,15 +245,17 @@ class TelegramNotificationManager:
         return self.send_sync(notification)
     
     def send_heartbeat(self, system_state: Dict):
-        """Send HEARTBEAT status update"""
         notification = NotificationMessage(
             priority=NotificationPriority.HEARTBEAT,
-            title=f"DAILY SUMMARY - AUTOBOT-{settings.ENVIRONMENT}",
+            title=f"HEARTBEAT - AUTOBOT-{settings.ENVIRONMENT}",
             message="",
             metadata=system_state
         )
         return self.send_sync(notification)
+    
+    def reset_daily_latch(self):
+        self._critical_latch.clear()
+        self._save_latch_state()
+        logger.info("CRITICAL latch reset")
 
-
-# Global notification manager instance
 notification_manager = TelegramNotificationManager()

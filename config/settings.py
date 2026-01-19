@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     
     # ============ System Configuration ============
     ENVIRONMENT: Literal["DRY_RUN", "TESTNET", "LIVE"] = "DRY_RUN"
+    DRY_RUN: bool = True  # Explicit dry run flag for testnet safety
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     LOG_FORMAT: str = "json"  # "json" or "text"
     
@@ -93,6 +94,9 @@ class Settings(BaseSettings):
     
     @property
     def is_dry_run(self) -> bool:
+        # Check explicit DRY_RUN flag first, then fall back to ENVIRONMENT
+        if self.DRY_RUN:
+            return True
         return self.ENVIRONMENT == "DRY_RUN"
 
 

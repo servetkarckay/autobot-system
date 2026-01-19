@@ -1,16 +1,41 @@
 """
 AUTOBOT Main Application Entry Point
-Event-driven autonomous trading system
+Event-driven autonomous trading system - ALL PERPETUAL USDT PAIRS (541 symbols)
 """
 import asyncio
 import signal
 import sys
 import logging
+import requests
 
 from config.settings import settings
 from config.logging_config import setup_logging, logger
 from core.data_pipeline.event_engine import TradingDecisionEngine
 from core.notification.telegram_manager import notification_manager
+
+
+def get_all_perpetual_symbols() -> list:
+    """Fetch ALL perpetual USDT pairs from Binance Futures"""
+    try:
+        # Get exchangeInfo to find all perpetual contracts
+        exchange_response = requests.get('https://fapi.binance.com/fapi/v1/exchangeInfo', timeout=10)
+        exchange_response.raise_for_status()
+        exchange_data = exchange_response.json()
+        
+        perpetual_symbols = []
+        for s in exchange_data['symbols']:
+            if (s['status'] == 'TRADING' 
+                and s['quoteAsset'] == 'USDT' 
+                and s['contractType'] == 'PERPETUAL'):
+                perpetual_symbols.append(s['symbol'])
+        
+        logger.info(f"Fetched {len(perpetual_symbols)} ALL perpetual USDT pairs from Binance Futures")
+        return sorted(perpetual_symbols)
+    
+    except Exception as e:
+        logger.error(f"Failed to fetch symbols from Binance: {e}")
+        # Fallback to default symbols
+        return ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
 
 
 class AutobotSystem:
@@ -21,8 +46,9 @@ class AutobotSystem:
         self._trading_engine = None
         self._running = False
         
-        # Symbols to trade
-        self.symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+        # Fetch ALL perpetual USDT pairs
+        self.symbols = get_all_perpetual_symbols()
+        logger.info(f"Trading {len(self.symbols)} symbols (ALL perpetual USDT pairs)")
         
     async def run(self):
         """Main system event loop"""
@@ -34,15 +60,15 @@ class AutobotSystem:
         self.logger.info("="*60)
         self.logger.info(f"Environment: {settings.ENVIRONMENT}")
         self.logger.info(f"Mode: {"DRY RUN" if settings.is_dry_run else "LIVE TRADING"}")
-        self.logger.info(f"Symbols: {self.symbols}")
+        self.logger.info(f"Symbols: {len(self.symbols)} ALL perpetual USDT pairs")
         self.logger.info("="*60)
         
         # Send startup notification
         notification_manager.send_info(
             title="AUTOBOT Started",
-            message=f"System started in {settings.ENVIRONMENT} mode",
+            message=f"System started in {settings.ENVIRONMENT} mode\nScanning ALL {len(self.symbols)} perpetual USDT pairs",
             environment=settings.ENVIRONMENT,
-            symbols=", ".join(self.symbols),
+            symbols=f"{len(self.symbols)} ALL pairs",
             dry_run=settings.is_dry_run
         )
         
@@ -76,28 +102,33 @@ class AutobotSystem:
         
         notification_manager.send_info(
             title="AUTOBOT Stopped",
-            message="System shutdown complete"
+            message=f"Stopped scanning {len(self.symbols)} symbols"
         )
-        
-        self.logger.info("Shutdown complete")
-    
-    def stop(self):
-        """Signal the system to stop"""
-        self.logger.info("Stop signal received")
-        self._running = False
 
 
 async def main():
-    """Application entry point"""
+    """Entry point"""
     
+    # Setup logging
+    setup_logging()
+    
+    # Create system instance
     system = AutobotSystem()
     
     # Setup signal handlers
     loop = asyncio.get_running_loop()
     
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(system._shutdown()))
+    def signal_handler():
+        logger.info("Shutdown signal received")
+        system._running = False
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
     
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+    
+    # Run system
     await system.run()
 
 
@@ -105,7 +136,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        sys.exit(1)
+        logger.info("Program interrupted")
+        sys.exit(0)

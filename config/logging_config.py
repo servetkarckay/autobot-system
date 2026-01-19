@@ -2,11 +2,13 @@
 AUTOBOT Logging Configuration
 Structured JSON logging for production environments
 """
+import os
 import logging
 import sys
 import json
 from datetime import datetime
 from typing import Any, Dict
+
 from pythonjsonlogger import jsonlogger
 
 from config.settings import settings

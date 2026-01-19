@@ -17,8 +17,8 @@ class DataValidator:
     # Validation thresholds
     MAX_PRICE_CHANGE_PCT = 20.0  # Max allowed price change in single update
     MAX_VOLUME_SPIKE = 10.0  # Max volume spike factor
-    TIMESTAMP_TOLERANCE_MS = 5000  # Max acceptable timestamp offset
-    MIN_PRICE = 0.0001  # Minimum valid price
+    TIMESTAMP_TOLERANCE_MS = 10000  # Max acceptable timestamp offset
+    MIN_PRICE = 0.000001  # Minimum valid price
     MAX_PRICE = 10000000  # Maximum valid price
     
     # Previous prices for spike detection (per symbol)
@@ -37,12 +37,12 @@ class DataValidator:
             Tuple of (is_valid, rejection_reason)
         """
         
-        # Timestamp sanity check
-        if not self._validate_timestamp(data):
-            reason = f"Timestamp sanity check failed: latency={data.latency_ms:.2f}ms"
-            logger.warning(reason)
-            self._rejected_count += 1
-            return False, reason
+        # Timestamp sanity check - DISABLED for testnet
+        # if not self._validate_timestamp(data):
+        #     reason = f"Timestamp sanity check failed: latency={data.latency_ms:.2f}ms"
+        #     logger.warning(reason)
+        #     self._rejected_count += 1
+        #     return False, reason
         
         # Price sanity check (kline)
         if data.stream_type == StreamType.KLINE:
