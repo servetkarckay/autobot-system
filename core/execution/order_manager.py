@@ -228,6 +228,78 @@ class OrderManager:
             logger.error(f"Failed to get open orders: {e}")
             return {}
     
+    async def close_position(
+        self,
+        symbol: str,
+        position: Position
+    ) -> OrderResult:
+        """
+        Pozisyon kapat (Market order ile)
+
+        Args:
+            symbol: Trading sembolü
+            position: Kapatılacak pozisyon
+
+        Returns:
+            OrderResult
+        """
+
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Would close position: {symbol} {position.side} qty={position.quantity}")
+            return OrderResult(
+                success=True,
+                order_id=f"DRY_CLOSE_{int(time.time() * 1000)}",
+                executed_price=position.current_price,
+                executed_quantity=position.quantity
+            )
+
+        try:
+            client = await self._get_client()
+
+            # Side belirle (LONG için SELL, SHORT için BUY)
+            side = "SELL" if position.side == "LONG" else "BUY"
+
+            # Quantity hazırla
+            qty_str = self._round_quantity(symbol, position.quantity)
+
+            logger.info(
+                f"Closing {position.side} position: {symbol} "
+                f"qty={qty_str} type=MARKET"
+            )
+
+            # Market order ile kapat
+            result = await client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type="MARKET",
+                quantity=qty_str,
+                positionSide=position.side
+            )
+
+            order_id = result.get("orderId", "N/A")
+            executed_price = float(result.get("avgPrice", position.current_price))
+            executed_qty = float(result.get("executedQty", position.quantity))
+
+            return OrderResult(
+                success=True,
+                order_id=str(order_id),
+                executed_price=executed_price,
+                executed_quantity=executed_qty
+            )
+
+        except BinanceAPIException as e:
+            logger.error(f"Binance API Error closing position: {e.code} - {e.message}")
+            return OrderResult(
+                success=False,
+                error_message=f"API Error {e.code}: {e.message}"
+            )
+        except Exception as e:
+            logger.error(f"Error closing position: {e}")
+            return OrderResult(
+                success=False,
+                error_message=str(e)
+            )
+
     async def set_stop_loss(self, position: Position, stop_price: float) -> bool:
         """Set or update stop-loss order for a position"""
         
