@@ -2,6 +2,7 @@
 AUTOBOT Data Pipeline - WebSocket Collector (Multi-Connection)
 Real-time market data collection from Binance WebSocket
 Supports multiple connections for large symbol lists
+Fixed: Improved ping/timeout settings for high-symbol count
 """
 import asyncio
 import json
@@ -86,6 +87,12 @@ class LatencyMetrics:
 class SingleWebSocketConnection:
     """Manages a single WebSocket connection for a batch of symbols"""
     
+    # Enhanced timeout settings for high-volume symbol lists
+    PING_INTERVAL = 30       # Send ping every 30 seconds
+    PING_TIMEOUT = 20        # Wait 20 seconds for pong response
+    CLOSE_TIMEOUT = 20       # Wait 20 seconds for close handshake
+    MAX_QUEUE_SIZE = 2**16   # Larger message queue for high throughput
+    
     def __init__(self, symbols: List[str], connection_id: int, base_url: str,
                  on_message_callback: Callable, on_error_callback: Callable = None):
         self.symbols = symbols
@@ -144,15 +151,24 @@ class SingleWebSocketConnection:
             try:
                 await self._connect()
                 return  # Connected successfully, exit reconnect loop
+            except asyncio.CancelledError:
+                logger.info(f"Connection #{self.connection_id}: Task cancelled")
+                raise
             except Exception as e:
                 self._reconnect_attempts += 1
-                logger.error(f"Connection #{self.connection_id}: Failed (attempt {self._reconnect_attempts}/{self._max_reconnect_attempts}): {e}")
+                logger.warning(f"Connection #{self.connection_id}: Failed (attempt {self._reconnect_attempts}/{self._max_reconnect_attempts}): {e}")
                 
                 if self._on_error_callback:
-                    await self._on_error_callback(e)
+                    try:
+                        await self._on_error_callback(e)
+                    except Exception as cb_error:
+                        logger.error(f"Error callback failed: {cb_error}")
                 
                 if self._reconnect_attempts < self._max_reconnect_attempts and not self._should_stop:
-                    await asyncio.sleep(self._reconnect_delay)
+                    # Exponential backoff for reconnection
+                    backoff_delay = min(self._reconnect_delay * (1.5 ** (self._reconnect_attempts - 1)), 60)
+                    logger.info(f"Connection #{self.connection_id}: Reconnecting in {backoff_delay:.1f}s...")
+                    await asyncio.sleep(backoff_delay)
         
         if not self._should_stop:
             logger.error(f"Connection #{self.connection_id}: Failed after {self._max_reconnect_attempts} attempts")
@@ -169,19 +185,51 @@ class SingleWebSocketConnection:
         
         logger.info(f"Connection #{self.connection_id}: Connecting to {self.base_url} ({len(self._subscriptions)} streams)")
         
-        async with websockets.connect(url, close_timeout=10, ping_interval=20, ping_timeout=10) as websocket:
-            self._ws = websocket
-            self._connected = True
-            self._reconnect_attempts = 0
-            
-            logger.info(f"Connection #{self.connection_id}: Connected successfully ({len(self.symbols)} symbols)")
-            
-            # Message loop
-            async for message in websocket:
-                if self._should_stop:
-                    break
-                if self._on_message_callback:
-                    await self._on_message_callback(message, self.connection_id)
+        try:
+            async with websockets.connect(
+                url,
+                close_timeout=self.CLOSE_TIMEOUT,
+                ping_interval=self.PING_INTERVAL,
+                ping_timeout=self.PING_TIMEOUT,
+                max_queue=self.MAX_QUEUE_SIZE
+            ) as websocket:
+                self._ws = websocket
+                self._connected = True
+                self._reconnect_attempts = 0
+                
+                logger.info(f"Connection #{self.connection_id}: Connected successfully ({len(self.symbols)} symbols)")
+                
+                # Message loop with error handling
+                try:
+                    async for message in websocket:
+                        if self._should_stop:
+                            break
+                        if self._on_message_callback:
+                            try:
+                                await self._on_message_callback(message, self.connection_id)
+                            except Exception as msg_error:
+                                logger.error(f"Connection #{self.connection_id}: Message processing error: {msg_error}")
+                except websockets.exceptions.ConnectionClosed as e:
+                    logger.warning(f"Connection #{self.connection_id}: Closed by server: {e}")
+                    raise
+                except asyncio.CancelledError:
+                    logger.info(f"Connection #{self.connection_id}: Connection task cancelled")
+                    raise
+                except Exception as e:
+                    logger.error(f"Connection #{self.connection_id}: Unexpected error in message loop: {e}")
+                    raise
+                    
+        except websockets.exceptions.InvalidURI as e:
+            logger.error(f"Connection #{self.connection_id}: Invalid URI: {e}")
+            raise
+        except (OSError, ConnectionError) as e:
+            logger.error(f"Connection #{self.connection_id}: Network error: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Connection #{self.connection_id}: Connection failed: {type(e).__name__}: {e}")
+            raise
+        finally:
+            self._connected = False
     
     @property
     def is_connected(self) -> bool:
@@ -221,6 +269,10 @@ class WebSocketCollector:
         # Metrics
         self._latency_metrics = LatencyMetrics()
         self._last_data_time: Optional[datetime] = None
+        
+        # Connection health monitoring
+        self._connection_errors: Dict[int, int] = {}
+        self._last_health_check: Optional[datetime] = None
         
         if websockets is None:
             raise ImportError("websockets package is required. Install with: pip install websockets")
@@ -289,24 +341,27 @@ class WebSocketCollector:
             conn.subscribe_book_ticker(batch)
             
             self._connections.append(conn)
+            self._connection_errors[i + 1] = 0
         
         # Start all connections
         tasks = []
         for conn in self._connections:
             await conn.start()
-            # Small delay between connections
+            # Small delay between connections to avoid rate limiting
             await asyncio.sleep(0.5)
         
         self._connected = True
         
+        # Start health check task
+        health_check_task = asyncio.create_task(self._health_check_loop())
+        
         # Wait for all connections to stay alive
-        # (they run in background tasks)
         try:
-            # Just keep the main task alive
             while self._connected:
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             logger.info("WebSocket collector main task cancelled")
+            health_check_task.cancel()
             await self.disconnect()
     
     async def disconnect(self):
@@ -320,6 +375,25 @@ class WebSocketCollector:
         
         self._connections.clear()
         logger.info("All WebSocket connections disconnected")
+    
+    async def _health_check_loop(self):
+        """Monitor connection health"""
+        while self._connected:
+            try:
+                await asyncio.sleep(30)  # Check every 30 seconds
+                
+                now = datetime.now(timezone.utc)
+                if self._last_data_time:
+                    data_age = (now - self._last_data_time).total_seconds()
+                    if data_age > 60:  # No data for 60 seconds
+                        logger.warning(f"No data received for {data_age:.0f} seconds")
+                
+                # Log connection status
+                connected_count = sum(1 for c in self._connections if c.is_connected)
+                logger.debug(f"Health check: {connected_count}/{len(self._connections)} connections active")
+                
+            except asyncio.CancelledError:
+                break
     
     async def _process_message(self, message: str, connection_id: int):
         """Process incoming WebSocket message from any connection"""
@@ -340,6 +414,10 @@ class WebSocketCollector:
             
             self._last_data_time = received_at
             
+            # Reset error counter on successful message
+            if connection_id in self._connection_errors:
+                self._connection_errors[connection_id] = 0
+            
             # Route to appropriate handler by event type
             event_type = data.get("e", "")
             
@@ -357,8 +435,12 @@ class WebSocketCollector:
     
     async def _handle_error(self, error: Exception):
         """Handle WebSocket error"""
+        logger.error(f"WebSocket error: {error}")
         if self._on_error_callback:
-            await self._on_error_callback(error)
+            try:
+                await self._on_error_callback(error)
+            except Exception as cb_error:
+                logger.error(f"Error callback failed: {cb_error}")
     
     async def _handle_kline(self, data: dict, received_at: datetime, latency_ms: float):
         """Handle kline data"""

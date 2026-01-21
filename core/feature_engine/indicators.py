@@ -32,31 +32,80 @@ class IndicatorCalculator:
             Dictionary of indicator values
         """
         
-        if df.empty or len(df) < 50:
-            logger.warning("Insufficient data for indicator calculation")
+        if df.empty or len(df) < 55:
+            logger.warning(f"Insufficient data for indicator calculation: {len(df)} bars (need 55 for breakout)")
             return {}
         
         indicators = {}
         
         try:
-            # Momentum indicators
+            # ============================================================
+            # TURTLE TRADING BREAKOUT LEVELS
+            # ============================================================
+            
+            # 20-day high/low (short-term breakout)
+            df['high_20'] = df['high'].rolling(window=20).max()
+            df['low_20'] = df['low'].rolling(window=20).min()
+            
+            # 55-day high/low (long-term breakout)
+            df['high_55'] = df['high'].rolling(window=55).max()
+            df['low_55'] = df['low'].rolling(window=55).min()
+            
+            # Get latest breakout levels
+            indicators["high_20"] = float(df['high_20'].iloc[-1])
+            indicators["low_20"] = float(df['low_20'].iloc[-1])
+            indicators["high_55"] = float(df['high_55'].iloc[-1])
+            indicators["low_55"] = float(df['low_55'].iloc[-1])
+            
+            # Breakout signals (flags)
+            current_close = float(df['close'].iloc[-1])
+            indicators["breakout_20_long"] = current_close > indicators["high_20"]
+            indicators["breakout_20_short"] = current_close < indicators["low_20"]
+            indicators["breakout_55_long"] = current_close > indicators["high_55"]
+            indicators["breakout_55_short"] = current_close < indicators["low_55"]
+            
+            # ============================================================
+            # MOMENTUM INDICATORS
+            # ============================================================
+            
+            # RSI
             indicators["rsi"] = self._calculate_rsi(df["close"])
+            
+            # Stochastic
             indicators["stoch_k"], indicators["stoch_d"] = self._calculate_stochastic(df)
             
-            # Trend indicators
+            # ============================================================
+            # TREND INDICATORS
+            # ============================================================
+            
+            # ADX (trend strength)
             indicators["adx"] = self._calculate_adx(df)
+            
+            # EMAs
             indicators["ema_20"] = self._calculate_ema(df["close"], 20)
             indicators["ema_50"] = self._calculate_ema(df["close"], 50)
             indicators["ema_20_above_ema_50"] = indicators["ema_20"] > indicators["ema_50"]
             
-            # Volatility indicators
+            # ============================================================
+            # VOLATILITY INDICATORS
+            # ============================================================
+            
+            # ATR (for Turtle position sizing)
             indicators["atr"] = self._calculate_atr(df)
             indicators["atr_pct"] = indicators["atr"] / df["close"].iloc[-1] * 100
+            
+            # Bollinger Bands
             indicators["bb_upper"], indicators["bb_middle"], indicators["bb_lower"] = self._calculate_bollinger_bands(df)
             indicators["bb_width"] = (indicators["bb_upper"] - indicators["bb_lower"]) / indicators["bb_middle"] * 100
             
-            # Volume indicators
+            # ============================================================
+            # VOLUME INDICATORS
+            # ============================================================
+            
             indicators["volume_sma"] = df["volume"].rolling(window=20).mean().iloc[-1]
+            
+            # Current price
+            indicators["close"] = float(df['close'].iloc[-1])
             
             # Latest values
             latest = {}
@@ -67,8 +116,10 @@ class IndicatorCalculator:
                     latest[key] = float(value.iloc[-1]) if len(value) > 0 else None
                 elif isinstance(value, (list, tuple)):
                     latest[key] = [float(v.iloc[-1]) if isinstance(v, pd.Series) and len(v) > 0 else None for v in value]
+                else:
+                    latest[key] = value
             
-            logger.debug(f"Calculated {len(latest)} indicators")
+            logger.debug(f"Calculated {len(latest)} indicators (including breakout levels)")
             return latest
             
         except Exception as e:

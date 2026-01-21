@@ -1,5 +1,6 @@
 """
 AUTOBOT Notification Manager - PRODUCTION READY
+Fixed event loop conflict for async environments
 """
 import logging
 import asyncio
@@ -11,6 +12,7 @@ from datetime import datetime, timezone, timedelta
 from enum import Enum
 from threading import Lock
 from pathlib import Path
+import concurrent.futures
 
 try:
     from telegram import Bot
@@ -53,6 +55,21 @@ class NotificationMessage:
         if self.timestamp is None:
             self.timestamp = datetime.now(timezone.utc)
     
+    def format(self) -> str:
+        lines = [
+            f"🔔 *{self.title}*",
+            f"📅 {self.timestamp.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        ]
+        
+        if self.metadata:
+            lines.append("\n📊 *Details:")
+            for key, value in sorted(self.metadata.items()):
+                if value is not None:
+                    lines.append(f"  • {key}: {value}")
+        
+        lines.append(f"\n💬 {self.message}")
+        return "\n".join(lines)
+    
     def get_event_key(self) -> str:
         key_parts = [self.title]
         if self.metadata:
@@ -63,6 +80,7 @@ class NotificationMessage:
 class TelegramNotificationManager:
     _instance = None
     _lock = Lock()
+    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="telegram")
     
     def __new__(cls):
         if cls._instance is None:
@@ -154,11 +172,37 @@ class TelegramNotificationManager:
             return False
         try:
             message = notification.format()
-            await self._bot.send_message(chat_id=self._chat_id, text=message)
+            await self._bot.send_message(chat_id=self._chat_id, text=message, parse_mode='Markdown')
             logger.info(f"[TELEGRAM SENT] [{notification.priority.value}] {notification.title}")
             return True
         except Exception as e:
-            logger.error(f"Telegram error: {e}")
+            logger.error(f"Telegram send error: {e}")
+            self._log_notification(notification)
+            return False
+    
+    def _run_in_thread(self, notification: NotificationMessage) -> bool:
+        """Run async send in a separate thread to avoid event loop conflicts"""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(asyncio.wait_for(self._send_async(notification), timeout=10.0))
+                return result
+            except asyncio.TimeoutError:
+                logger.warning(f"Telegram send timeout: {notification.title}")
+                return False
+            except Exception as e:
+                logger.error(f"Telegram send error in thread: {e}")
+                return False
+            finally:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+        except Exception as e:
+            logger.error(f"Thread execution error: {e}")
             self._log_notification(notification)
             return False
     
@@ -170,28 +214,24 @@ class TelegramNotificationManager:
                 return False
         
         if not self._check_rate_limit(notification.priority):
-            logger.warning(f"Rate limited: {notification.priority.value}")
-            self._log_notification(notification)
+            logger.debug(f"Rate limited: {notification.priority.value}")
             return False
         
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            # Check if we're in an async context
             try:
-                result = loop.run_until_complete(asyncio.wait_for(self._send_async(notification), timeout=10.0))
+                loop = asyncio.get_running_loop()
+                # We're in an async context, submit to thread pool
+                future = self._executor.submit(self._run_in_thread, notification)
+                result = future.result(timeout=12.0)
                 if result:
                     self._send_history[notification.priority.value].append(time.time())
                     if notification.priority == NotificationPriority.CRITICAL:
                         self._set_latch(notification.get_event_key())
                 return result
-            except asyncio.TimeoutError:
-                return False
-            finally:
-                try:
-                    loop.run_until_complete(loop.shutdown_async())
-                except:
-                    pass
-                loop.close()
+            except RuntimeError:
+                # No running loop, use direct execution
+                return self._run_in_thread(notification)
         except Exception as e:
             logger.error(f"send_sync error: {e}")
             self._log_notification(notification)
@@ -257,5 +297,9 @@ class TelegramNotificationManager:
         self._critical_latch.clear()
         self._save_latch_state()
         logger.info("CRITICAL latch reset")
+    
+    def shutdown(self):
+        """Cleanup on shutdown"""
+        self._executor.shutdown(wait=True)
 
 notification_manager = TelegramNotificationManager()

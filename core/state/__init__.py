@@ -53,44 +53,50 @@ class SystemState:
     # System status
     status: SystemStatus = SystemStatus.RUNNING
     last_update: datetime = field(default_factory=datetime.utcnow)
-    
+
     # Market state
     current_regime: MarketRegime = MarketRegime.UNKNOWN
     volatility_regime: VolatilityRegime = VolatilityRegime.NORMAL
-    
+
     # Portfolio state
     equity: float = 0.0
     peak_equity: float = 0.0
     current_drawdown_pct: float = 0.0
     daily_pnl: float = 0.0
     daily_pnl_pct: float = 0.0
-    
+
     # Open positions
     open_positions: Dict[str, Position] = field(default_factory=dict)
-    
+
     # Adaptive parameters (tunable by Adaptive Engine)
     strategy_weights: Dict[str, float] = field(default_factory=dict)
     stop_loss_multiplier: float = 2.5
     activation_threshold: float = 0.7
-    
+
     # Risk limits
     daily_loss_limit_pct: float = 3.0
     max_drawdown_pct: float = 15.0
-    
+
     # Performance tracking
     total_trades: int = 0
     winning_trades: int = 0
     losing_trades: int = 0
-    
+
     def to_dict(self) -> dict:
         """Convert state to dictionary for JSON serialization"""
         data = asdict(self)
         # Handle datetime serialization
         data["last_update"] = self.last_update.isoformat()
+        # Handle enum serialization
+        data["status"] = self.status.value
+        data["current_regime"] = self.current_regime.value
+        data["volatility_regime"] = self.volatility_regime.value
+        # Handle open positions
         for pos in self.open_positions.values():
             pos.entry_time = pos.entry_time.isoformat()
+            pos.regime_at_entry = pos.regime_at_entry.value
         return data
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> "SystemState":
         """Create state from dictionary"""
@@ -121,11 +127,14 @@ class TradeSignal:
     """Generated trading signal from Decision Engine"""
     symbol: str
     action: Literal["PROPOSE_LONG", "PROPOSE_SHORT", "NEUTRAL", "CLOSE"]
-    bias_score: float  # -1.0 to +1.0
-    confidence: float  # 0.0 to 1.0
+    bias_score: float
+    confidence: float
     strategy_name: str
     regime: MarketRegime
     timestamp: datetime = field(default_factory=datetime.utcnow)
+    atr: float = 0.0
+    suggested_price: float = 0.0
+    suggested_quantity: float = 0.0
     metadata: dict = field(default_factory=dict)
 
 

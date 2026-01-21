@@ -1,38 +1,31 @@
-# AUTOBOT System Requirements
+# AUTOBOT Trading System Dependencies
+# TESTNET Environment
 
-# Configuration
+# Core Framework
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
-python-dotenv>=1.0.0
 
-# Logging
-python-json-logger>=2.0.0
+# Async and Networking
+aiohttp>=3.9.0
+websockets>=12.0
+requests>=2.31.0
 
-# Data Processing
-pandas>=2.0.0
+# Data and Validation
+python-dateutil>=2.8.2
 numpy>=1.24.0
 
-# Technical Analysis
-pandas-ta>=0.3.14b
+# Logging
+python-json-logger>=2.0.7
 
-# API Clients
-python-binance>=1.0.19
-
-# WebSocket (CRITICAL for real-time data)
-websockets>=12.0
-
-# Database/Cache
+# Redis
 redis>=5.0.0
 
-# Notifications
+# Telegram
 python-telegram-bot>=20.0
 
-# Async
-asyncio-mqtt>=0.13.0
+# Binance
+python-binance>=1.0.19
 
-# Development
-pytest>=7.0.0
+# Testing (optional)
+pytest>=7.4.0
 pytest-asyncio>=0.21.0
-black>=23.0.0
-flake8>=6.0.0
-mypy>=1.0.0

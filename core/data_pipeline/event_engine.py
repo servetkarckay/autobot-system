@@ -15,11 +15,13 @@ from core.feature_engine.regime_detector import RegimeDetector
 from core.decision.rule_engine import RuleEngine
 from core.decision.bias_generator import BiasAggregator
 from core.risk.pre_trade_veto import PreTradeVetoChain, VetoConfig
+from core.risk.position_sizer import position_sizer
 from core.execution.order_manager import OrderManager
 from core.state.state_persistence import state_manager
 from core.state import SystemState, SystemStatus, MarketRegime, TradeSignal, Position
 from config.settings import settings
 from core.notification.telegram_manager import notification_manager, NotificationPriority
+from strategies.trading_rules import register_all_rules
 
 logger = logging.getLogger("autobot.data.event_engine")
 
@@ -73,6 +75,8 @@ class TradingDecisionEngine:
         # Register event handlers
         self._register_event_handlers()
         
+        # Register all trading rules
+        register_all_rules(self.rule_engine)
         logger.info("TradingDecisionEngine initialized")
     
     def _register_event_handlers(self):
@@ -172,7 +176,7 @@ class TradingDecisionEngine:
         if signal.action in ["PROPOSE_LONG", "PROPOSE_SHORT"]:
             
             # Calculate position size (simplified - would use proper sizing logic)
-            proposed_quantity = 0.01  # TODO: Implement proper position sizing
+            proposed_quantity = None  # Let position_sizer calculate it
             
             veto_result = self.veto_chain.evaluate(
                 signal=signal,
@@ -183,7 +187,7 @@ class TradingDecisionEngine:
             
             if veto_result.approved:
                 # Step 5: Execute approved signal
-                await self._execute_signal(signal, data.close, proposed_quantity)
+                await self._execute_signal(signal, data.close, 0.0)
             else:
                 logger.warning(f"Signal vetoed: {veto_result.veto_reason} at {veto_result.veto_stage}")
                 
@@ -252,29 +256,51 @@ class TradingDecisionEngine:
         max_buffer = 1000
         if len(self._ohlcv_buffers[symbol]) > max_buffer:
             self._ohlcv_buffers[symbol] = self._ohlcv_buffers[symbol][-max_buffer:]
-    
-    async def _execute_signal(self, signal: TradeSignal, price: float, quantity: float):
-        """Execute an approved trading signal"""
+    async def _execute_signal(self, signal: TradeSignal, price: float, quantity: float = None):
+        """Execute an approved trading signal with position sizing"""
+        
+        # Calculate position size using Turtle N-unit method if not provided
+        if quantity is None or quantity <= 0:
+            use_price = signal.suggested_price if signal.suggested_price > 0 else price
+            pos_result = position_sizer.calculate_from_signal(
+                equity=self._state.equity,
+                signal=signal,
+                current_price=use_price
+            )
+            
+            if not pos_result.valid:
+                logger.warning(f"Position sizing failed for {signal.symbol}: {pos_result.reason}")
+                return
+            
+            quantity = pos_result.quantity
+            
+            logger.info(
+                f"Position sizing {signal.symbol}: equity={self._state.equity:.0f}, "
+                f"price={use_price:.2f}, atr={signal.atr:.4f} -> qty={quantity:.3f}, "
+                f"value={pos_result.position_value_usdt:.2f}, risk={pos_result.risk_amount_usdt:.2f}"
+            )
+        
+        # Minimum quantity check
+        if quantity < 0.001:
+            logger.warning(f"Calculated quantity too small for {signal.symbol}: {quantity}")
+            return
         
         # Submit order
-        result = self.order_manager.submit_order(
+        result = await self.order_manager.submit_order(
             signal=signal,
             quantity=quantity,
-            price=price  # Would use limit price calculation
+            price=price
         )
         
         if result.success:
-            logger.info(f"Order submitted: {signal.symbol} {signal.action} qty={quantity}")
+            logger.info(f"Order submitted: {signal.symbol} {signal.action} qty={quantity:.3f} @ {price:.2f}")
             
             notification_manager.send_info(
                 title="Trade Executed",
                 message=f"{signal.symbol} {signal.action}",
-                quantity=quantity,
-                price=price
+                quantity=f"{quantity:.3f}",
+                price=f"{price:.2f}"
             )
-            
-            # Update state (would track position properly)
-            # self._state.open_positions[signal.symbol] = ...
             
             # Persist state
             state_manager.save_state(self._state)
