@@ -14,7 +14,7 @@ from core.data_pipeline.event_engine import TradingDecisionEngine
 from core.notification.telegram_manager import notification_manager
 
 
-def get_all_perpetual_symbols() -> list:
+def ["1000PEPEUSDT"] -> list:
     """Fetch ALL perpetual USDT pairs from Binance Futures"""
     try:
         # Get exchangeInfo to find all perpetual contracts
@@ -47,7 +47,7 @@ class AutobotSystem:
         self._running = False
         
         # Fetch ALL perpetual USDT pairs
-        self.symbols = get_all_perpetual_symbols()
+        self.symbols = ["1000PEPEUSDT"]
         logger.info(f"Trading {len(self.symbols)} symbols (ALL perpetual USDT pairs)")
         
     async def run(self):

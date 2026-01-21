@@ -31,7 +31,7 @@ class PositionSizer:
     
     def __init__(
         self,
-        risk_per_trade_pct: float = 0.01,  # %1 of equity
+        risk_per_trade_pct: float = 1.0,  # %1 of equity
         atr_multiplier: float = 2.0,      # 2N stop loss
         min_quantity_usdt: float = 5.0,     # Minimum trade size
         max_position_usdt: float = 1000.0  # Max per trade

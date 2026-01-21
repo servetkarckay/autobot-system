@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     LOG_FORMAT: str = "json"  # "json" or "text"
     
     # ============ Trading Parameters ============
-    MAX_POSITIONS: int = 5
+    MAX_POSITIONS: int = 1
     MAX_POSITION_SIZE_USDT: float = 1000.0
     MAX_DRAWDOWN_PCT: float = 15.0
     DAILY_LOSS_LIMIT_PCT: float = 3.0
