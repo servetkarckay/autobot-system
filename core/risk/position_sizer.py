@@ -90,9 +90,17 @@ class PositionSizer:
                 valid=False
             )
         
-        if atr <= 0:
-            logger.warning(f"Zero or negative ATR for {symbol}, using default 1% of price")
-            atr = price * 0.01  # Fallback: 1% of price as ATR
+        # KRITIK FIX: Check if ATR is too small relative to price
+        # For low-priced assets (like PEPE at $0.005), tiny ATR values cause huge position calculations
+        atr_pct_of_price = (atr / price) if price > 0 else 0
+
+        if atr <= 0 or atr_pct_of_price < 0.005:  # ATR < 0.5% of price
+            logger.debug(
+                f"[POSITION SIZER] {symbol}: ATR too small relative to price "
+                f"(ATR={atr:.6f}, Price={price:.6f}, Ratio={atr_pct_of_price:.4%}), "
+                f"using percentage-based ATR (1% of price)"
+            )
+            atr = price * 0.01  # Use 1% of price as ATR fallback
         
         # Calculate risk amount
         risk_amount = equity * self.risk_per_trade_pct
@@ -122,7 +130,7 @@ class PositionSizer:
         
         # Check maximum
         if position_value > self.max_position_usdt:
-            logger.warning(f"Position value ({position_value:.2f}) exceeds maximum ({self.max_position_usdt}), capping")
+            logger.debug(f"Position value ({position_value:.2f}) exceeds maximum ({self.max_position_usdt}), capping")
             position_value = self.max_position_usdt
             quantity = position_value / price
         

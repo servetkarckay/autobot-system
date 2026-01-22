@@ -152,12 +152,20 @@ class IndicatorCalculator:
         return float(k.iloc[-1]) if len(k) > 0 else 50.0, float(d.iloc[-1]) if len(d) > 0 else 50.0
     
     def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
-        """Calculate ADX indicator"""
+        """Calculate ADX indicator - FIXED with validation"""
         if ta is not None:
             adx_series = ta.adx(df["high"], df["low"], df["close"], length=period)["ADX_14"]
-            return float(adx_series.iloc[-1]) if len(adx_series) > 0 else 0.0
+            adx_value = float(adx_series.iloc[-1]) if len(adx_series) > 0 else 0.0
+            # Validate ADX value
+            if not (0 <= adx_value <= 100) or pd.isna(adx_value) or np.isinf(adx_value):
+                logger.warning(f"Invalid ADX from pandas-ta: {adx_value:.2f}, using fallback")
+                return self._calculate_adx_fallback(df, period)
+            return adx_value
         
-        # Simplified ADX calculation
+        return self._calculate_adx_fallback(df, period)
+    
+    def _calculate_adx_fallback(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Fallback ADX calculation with proper validation"""
         high = df["high"]
         low = df["low"]
         close = df["close"]
@@ -170,13 +178,26 @@ class IndicatorCalculator:
         tr = pd.concat([high - low, (high - close).abs(), (low - close).abs()], axis=1).max(axis=1)
         atr = tr.rolling(window=period).mean()
         
-        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
-        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+        # Avoid division by zero
+        atr_safe = atr.replace(0, np.nan)
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr_safe)
+        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr_safe)
         
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        # Avoid division by zero in DX calculation
+        di_sum = plus_di + minus_di
+        di_sum_safe = di_sum.replace(0, np.nan)
+        dx = 100 * abs(plus_di - minus_di) / di_sum_safe
+        
         adx = dx.rolling(window=period).mean()
         
-        return float(adx.iloc[-1]) if len(adx) > 0 else 0.0
+        adx_value = float(adx.iloc[-1]) if len(adx) > 0 else 0.0
+        
+        # Final validation
+        if pd.isna(adx_value) or np.isinf(adx_value) or adx_value > 100:
+            logger.warning(f"Invalid ADX after fallback: {adx_value:.2f}, defaulting to 20")
+            return 20.0  # Return neutral value instead of 0
+        
+        return min(adx_value, 100.0)  # Cap at 100
     
     def _calculate_ema(self, close: pd.Series, period: int) -> float:
         """Calculate EMA indicator"""

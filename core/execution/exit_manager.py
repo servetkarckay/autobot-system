@@ -186,6 +186,26 @@ class ExitManager:
 
         metadata = position.exit_metadata
 
+        # ========== KRITIK: İlk bar'da exit atla ==========
+        # Binance -2022 hatasını önlemek için: Pozisyon açıldıktan sonraki
+        # ilk 60 saniye içinde exit kontrolünü atla (emir henüz match olmamış olabilir)
+        now = datetime.now(timezone.utc)
+        position_age_seconds = (now - position.entry_time).total_seconds()
+
+        MIN_POSITION_AGE_SECONDS = 60  # İlk 60 saniyede exit yok
+
+        if position_age_seconds < MIN_POSITION_AGE_SECONDS:
+            logger.debug(
+                f"[EXIT SKIP] {symbol}: Position too young ({position_age_seconds:.1f}s < {MIN_POSITION_AGE_SECONDS}s), "
+                f"skipping exit check to avoid Binance -2022 error"
+            )
+            return ExitSignal(
+                should_exit=False,
+                reason="",
+                exit_type="",
+                urgency=""
+            )
+
         # ========== KRİTİK: Bar başına tek exit kontrolü ==========
         if metadata.last_exit_check_ts and bar_timestamp <= metadata.last_exit_check_ts:
             # Bu bar zaten kontrol edildi

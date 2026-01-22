@@ -37,13 +37,13 @@ class DataValidator:
             Tuple of (is_valid, rejection_reason)
         """
         
-        # Timestamp sanity check - DISABLED for testnet
-        # if not self._validate_timestamp(data):
-        #     reason = f"Timestamp sanity check failed: latency={data.latency_ms:.2f}ms"
-        #     logger.warning(reason)
-        #     self._rejected_count += 1
-        #     return False, reason
-        
+        # Timestamp sanity check - enabled for production only
+        if not settings.is_testnet:  # Skip validation for testnet
+            if not self._validate_timestamp(data):
+                reason = f"Timestamp sanity check failed: latency={data.latency_ms:.2f}ms"
+                logger.warning(reason)
+                self._rejected_count += 1
+                return False, reason
         # Price sanity check (kline)
         if data.stream_type == StreamType.KLINE:
             if not self._validate_kline(data):

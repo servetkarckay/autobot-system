@@ -72,10 +72,6 @@ class PreTradeVetoChain:
     
     def _check_position_size(self, signal: TradeSignal, state: SystemState,
                             quantity: float, price: float) -> VetoResult:
-        """Veto if position size exceeds limit"""
-        # Skip check if quantity is None (will be calculated later)
-        if quantity is None or quantity <= 0:
-            return VetoResult(approved=True)
 
         # Skip check if quantity is None (will be calculated later)
         if quantity is None or quantity <= 0:

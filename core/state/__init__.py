@@ -142,12 +142,25 @@ class SystemState:
             k: v.value for k, v in self.symbol_regimes.items()
         }
 
-        # Handle open positions
-        for pos in self.open_positions.values():
-            pos.entry_time = pos.entry_time.isoformat()
-            pos.regime_at_entry = pos.regime_at_entry.value
-            # Exit metadata persist edilmez (runtime only)
-            pos.exit_metadata = None
+        # Handle open positions - serialize each position
+        serialized_positions = {}
+        for symbol, pos in self.open_positions.items():
+            pos_dict = {
+                "symbol": pos.symbol,
+                "side": pos.side,
+                "quantity": pos.quantity,
+                "entry_price": pos.entry_price,
+                "current_price": pos.current_price,
+                "unrealized_pnl": pos.unrealized_pnl,
+                "stop_loss_price": pos.stop_loss_price,
+                "take_profit_price": pos.take_profit_price,
+                "entry_time": pos.entry_time.isoformat(),
+                "strategy_name": pos.strategy_name,
+                "regime_at_entry": pos.regime_at_entry.value,
+                "exit_metadata": None  # Runtime only, not persisted
+            }
+            serialized_positions[symbol] = pos_dict
+        data["open_positions"] = serialized_positions
 
         return data
 

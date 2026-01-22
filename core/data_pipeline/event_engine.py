@@ -22,6 +22,7 @@ from core.risk.pre_trade_veto import PreTradeVetoChain, VetoConfig
 from core.risk.position_sizer import position_sizer
 from core.execution.order_manager import OrderManager
 from core.execution.exit_manager import exit_manager, ExitSignal
+from core.risk.adx_entry_gate import adx_entry_gate
 from core.state.state_persistence import state_manager
 from core.state import SystemState, SystemStatus, MarketRegime, TradeSignal, Position
 from config.settings import settings
@@ -153,6 +154,17 @@ class TradingDecisionEngine:
         if data.is_kline_closed:
             await self._on_kline_close(data)
 
+
+    def _cleanup_feature_cache(self):
+        """Clean up old feature cache entries to prevent memory leak"""
+        max_cache_entries = 100  # Keep only last 100 symbols
+        if len(self._feature_cache) > max_cache_entries:
+            # Remove oldest entries (first half)
+            items_to_remove = list(self._feature_cache.keys())[:max_cache_entries // 2]
+            for key in items_to_remove:
+                del self._feature_cache[key]
+            logger.debug(f"[CLEANUP] Removed {len(items_to_remove)} old feature cache entries")
+
     async def _on_kline_close(self, data: MarketData):
         """Handle kline close event - DECISION TRIGGER"""
 
@@ -219,6 +231,8 @@ class TradingDecisionEngine:
         if old_regime != current_regime and old_regime != MarketRegime.UNKNOWN:
             logger.warning(f"[REGIME CHANGE] {symbol}: {old_regime.value} → {current_regime.value}")
 
+        # Update exit manager with ADX (for momentum loss exit)
+        exit_manager.update_symbol_adx(symbol, features.get("adx", 0), int(data.timestamp.timestamp() * 1000))
         # Step 3: Generate signal from Decision Engine
         logger.debug(f"[STEP 3] {symbol}: Evaluating trading rules...")
         signal = self.rule_engine.evaluate(
@@ -235,9 +249,29 @@ class TradingDecisionEngine:
             f"Active Rules: {signal.metadata.get('active_rules', 0)}"
         )
 
-        # Step 4: Apply Risk Veto Chain
+        # Step 4: ADX Entry Gate (Chop Filter)
         if signal.action in ["PROPOSE_LONG", "PROPOSE_SHORT"]:
-            logger.debug(f"[STEP 4] {symbol}: Running veto chain...")
+            logger.debug(f"[STEP 4] {symbol}: Running ADX entry gate...")
+            
+            adx_result = adx_entry_gate.check(signal, features, symbol)
+            
+            if not adx_result.approved:
+                logger.warning(f"[ADX GATE REJECTED] {symbol}: {adx_result.veto_reason}")
+                
+                notification_manager.send_warning(
+                    title="Trade Blocked - Chop Filter",
+                    message=adx_result.veto_reason,
+                    symbol=symbol,
+                    stage="adx_entry_gate",
+                    adx=f"{features.get('adx', 0):.1f}"
+                )
+                return  # Skip veto chain and execution
+            
+            logger.info(f"[ADX GATE PASSED] {symbol}: Trend confirmed, proceeding to veto chain")
+        
+        # Step 5: Apply Risk Veto Chain
+        if signal.action in ["PROPOSE_LONG", "PROPOSE_SHORT"]:
+            logger.debug(f"[STEP 5] {symbol}: Running veto chain...")
 
             # Calculate position size (simplified - would use proper sizing logic)
             proposed_quantity = None  # Let position_sizer calculate it
@@ -255,8 +289,8 @@ class TradingDecisionEngine:
             )
 
             if veto_result.approved:
-                # Step 5: Execute approved signal
-                logger.debug(f"[STEP 5] {symbol}: Executing signal...")
+                # Step 6: Execute approved signal
+                logger.debug(f"[STEP 6] {symbol}: Executing signal...")
                 await self._execute_signal(signal, data.close, 0.0)
             else:
                 logger.warning(f"[VETO REJECTED] {symbol}: {veto_result.veto_reason} at {veto_result.veto_stage}")
@@ -314,6 +348,10 @@ class TradingDecisionEngine:
 
             # Cache features
             self._feature_cache[symbol] = features
+            
+            # Periodic cleanup
+            if len(self._feature_cache) > 100:
+                self._cleanup_feature_cache()
 
             logger.debug(f"[FEATURES] {symbol}: {len(features)} indicators calculated")
             return features
@@ -346,6 +384,45 @@ class TradingDecisionEngine:
 
         symbol = signal.symbol
         logger.debug(f"[EXECUTE] {symbol}: Starting execution...")
+
+        # KRITIK FIX: Check if existing position exists (same or opposite side)
+        new_side = "LONG" if "LONG" in signal.action else "SHORT"
+        if symbol in self._state.open_positions:
+            existing_position = self._state.open_positions[symbol]
+            
+            if existing_position.side == new_side:
+                # Same side - position already exists, skip this signal
+                logger.info(
+                    f"[POSITION EXISTS] {symbol}: {new_side} position already open, "
+                    f"skipping duplicate signal. Entry: {existing_position.entry_price:.5f}, "
+                    f"Current: {price:.5f}"
+                )
+                return
+            
+            # Opposite side - need to close first
+            logger.warning(
+                f"[POSITION CONFLICT] {symbol}: Cannot open {new_side} while {existing_position.side} exists. "
+                f"Closing existing position and canceling open orders..."
+            )
+            
+            # KRITIK FIX: Cancel any pending orders for this symbol
+            try:
+                open_orders = await self.order_manager.get_open_orders(symbol)
+                if open_orders and len(open_orders) > 0:
+                    logger.warning(f"[CANCEL ORDERS] {symbol}: Found {len(open_orders)} open orders, canceling...")
+                    for order in open_orders:
+                        order_id = order.get('orderId')
+                        if order_id:
+                            await self.order_manager.cancel_order(str(order_id), symbol)
+                            logger.info(f"[CANCEL ORDERS] {symbol}: Canceled order {order_id}")
+                else:
+                    logger.debug(f"[CANCEL ORDERS] {symbol}: No open orders to cancel")
+            except Exception as e:
+                logger.error(f"[CANCEL ORDERS] {symbol}: Error canceling orders: {e}")
+            
+            await self._close_position(symbol)
+            logger.info(f"[POSITION CONFLICT] {symbol}: Old position closed, proceeding with {new_side}")
+
 
         # Calculate position size using Turtle N-unit method if not provided
         if quantity is None or quantity <= 0:
@@ -391,6 +468,43 @@ class TradingDecisionEngine:
                 f"[ORDER FILLED] {symbol} {signal.action} | "
                 f"Qty={quantity:.3f} | Price=${price:.2f} | "
                 f"OrderID={result.order_id}"
+            )
+
+            # KRITIK FIX: Create Position object after order fill
+            position_side = "LONG" if "LONG" in signal.action else "SHORT"
+
+            # Calculate stop loss (2N from entry)
+            atr = signal.atr if signal.atr and signal.atr > 0 else 0.0001
+            if position_side == "LONG":
+                stop_loss = price - (2 * atr)
+            else:
+                stop_loss = price + (2 * atr)
+
+            # Import ExitMetadata
+            from core.state import ExitMetadata
+
+            # Create Position object with exit_metadata
+            position = Position(
+                symbol=symbol,
+                side=position_side,
+                entry_price=price,
+                quantity=quantity,
+                current_price=price,
+                stop_loss_price=stop_loss,
+                entry_time=datetime.now(timezone.utc),
+                regime_at_entry=self._state.current_regime,
+                unrealized_pnl=0.0,
+                exit_metadata=ExitMetadata()  # Initialize with empty metadata
+            )
+
+            # Add to state
+            self._state.open_positions[symbol] = position
+
+            logger.info(
+                f"[POSITION OPENED] {symbol} {position_side} | "
+                f"Entry=${price:.4f} | Qty={quantity:.3f} | "
+                f"Stop Loss=${stop_loss:.4f} | "
+                f"Open Positions: {len(self._state.open_positions)}"
             )
 
             notification_manager.send_info(
