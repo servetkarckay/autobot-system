@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 
 from core.data_pipeline.websocket_collector import MarketData, StreamType
 
+from config.settings import settings
 logger = logging.getLogger("autobot.data.validator")
 
 
@@ -38,6 +39,7 @@ class DataValidator:
         """
         
         # Timestamp sanity check - enabled for production only
+        from config.settings import settings
         if not settings.is_testnet:  # Skip validation for testnet
             if not self._validate_timestamp(data):
                 reason = f"Timestamp sanity check failed: latency={data.latency_ms:.2f}ms"

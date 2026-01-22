@@ -7,7 +7,7 @@ from typing import Optional
 from dataclasses import dataclass
 
 from config.settings import settings
-from core.state import TradeSignal, VetoResult, SystemState, Position
+from core.state_manager import TradeSignal, VetoResult, SystemState, Position
 
 logger = logging.getLogger("autobot.risk.pre_trade")
 

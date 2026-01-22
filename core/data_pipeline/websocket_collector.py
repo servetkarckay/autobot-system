@@ -19,7 +19,7 @@ except ImportError:
     websockets = None
 
 from config.settings import settings
-from core.notification.telegram_manager import notification_manager, NotificationPriority
+from core.notifier import notification_manager, NotificationPriority
 
 logger = logging.getLogger("autobot.data.websocket")
 

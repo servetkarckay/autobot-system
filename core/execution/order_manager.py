@@ -1,9 +1,15 @@
 """
-AUTOBOT Execution Engine - Order Manager
+AUTOBOT Execution Engine - Order Manager v1.2
 Handles order submission, cancellation, and monitoring
+
+FIXES:
+- Use cached secret values instead of repeated get_secret_value() calls
+- Added better error handling
+- Added input validation
 """
 import logging
 import asyncio
+import math
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,7 +18,7 @@ import time
 from binance import AsyncClient
 from binance.exceptions import BinanceAPIException
 from config.settings import settings
-from core.state import TradeSignal, Position
+from core.state_manager import TradeSignal, Position
 
 logger = logging.getLogger("autobot.execution.order")
 
@@ -40,20 +46,28 @@ class OrderManager:
         self._open_orders: Dict[str, Dict] = {}
         self._client: Optional[AsyncClient] = None
         self._symbol_filters: Dict[str, Dict] = {}
-        self._hedge_mode = None  # Will be detected on first API call
+        self._hedge_mode = None
         logger.info(f"OrderManager initialized (dry_run={dry_run})")
     
+    def _is_valid_numeric(self, value: float) -> bool:
+        """Check if value is valid finite number"""
+        return isinstance(value, (int, float)) and math.isfinite(value) and not math.isnan(value) and value > 0
+    
     async def _get_client(self) -> AsyncClient:
-        """Get or create Binance client"""
+        """Get or create Binance client using cached credentials"""
         if self._client is None:
-            api_key = settings.BINANCE_API_KEY.get_secret_value()
-            api_secret = settings.BINANCE_API_SECRET.get_secret_value()
+            # Use cached secret values from settings
+            api_key = settings.binance_api_key
+            api_secret = settings.binance_api_secret
+            
+            if not api_key or not api_secret:
+                raise ValueError("Binance API credentials not configured")
+            
             self._client = await AsyncClient.create(
                 api_key=api_key,
                 api_secret=api_secret,
                 testnet=settings.BINANCE_TESTNET
             )
-            # Load exchange info for precision rules
             await self._load_symbol_filters()
         return self._client
     
@@ -71,18 +85,19 @@ class OrderManager:
     
     def _round_quantity(self, symbol: str, quantity: float) -> str:
         """Round quantity to symbol's precision rules"""
+        if not self._is_valid_numeric(quantity):
+            logger.warning(f"Invalid quantity for rounding: {quantity}")
+            return "0.001"
+        
         if symbol not in self._symbol_filters:
-            # Default to 3 decimal places
             return f"{quantity:.3f}".rstrip('0').rstrip('.')
         
         lot_size = self._symbol_filters[symbol].get('LOT_SIZE', {})
         if lot_size:
             step_size = float(lot_size.get('stepSize', '0.001'))
-            # Calculate precision from step size
             precision = 0
             if step_size < 1:
                 precision = len(str(step_size).split('.')[-1].rstrip('0'))
-            # Round down to step size
             rounded = int(quantity / step_size) * step_size
             return f"{rounded:.{precision}f}".rstrip('0').rstrip('.')
         
@@ -90,6 +105,10 @@ class OrderManager:
     
     def _round_price(self, symbol: str, price: float) -> str:
         """Round price to symbol's precision rules"""
+        if not self._is_valid_numeric(price):
+            logger.warning(f"Invalid price for rounding: {price}")
+            return f"{price:.8f}".rstrip('0').rstrip('.')
+        
         if symbol not in self._symbol_filters:
             return f"{price:.8f}".rstrip('0').rstrip('.')
         
@@ -105,53 +124,39 @@ class OrderManager:
     
     async def submit_order(self, signal: TradeSignal, quantity: float, 
                     price: Optional[float] = None) -> OrderResult:
-        """
-        Submit an order based on a trading signal.
-        
-        Args:
-            signal: The approved trading signal
-            quantity: Order quantity in base asset
-            price: Limit price (None for market orders)
-        
-        Returns:
-            OrderResult with execution details
-        """
+        """Submit an order based on a trading signal"""
+        if not self._is_valid_numeric(quantity):
+            return OrderResult(
+                success=False,
+                error_message=f"Invalid quantity: {quantity}"
+            )
         
         if self.dry_run:
             return await self._submit_dry_run_order(signal, quantity, price)
         
-        # Determine order side and type
         side = "BUY" if "LONG" in signal.action else "SELL"
         position_side = "LONG" if "LONG" in signal.action else "SHORT"
-        
-        if price is None:
-            order_type = "MARKET"
-        else:
-            order_type = "LIMIT"
+        order_type = "MARKET" if price is None else "LIMIT"
         
         try:
             client = await self._get_client()
-            
-            # Round quantity and price according to symbol rules
             qty_str = self._round_quantity(signal.symbol, quantity)
             
             logger.info(f"Submitting {order_type} order: {signal.symbol} {signal.action} qty={qty_str}")
             
-            # Prepare order parameters
             params = {
                 "symbol": signal.symbol,
                 "side": side,
                 "type": order_type,
                 "quantity": qty_str,
-                "positionSide": position_side  # Required for Hedge Mode
+                "positionSide": position_side
             }
             
             if order_type == "LIMIT" and price is not None:
                 price_str = self._round_price(signal.symbol, price)
                 params["price"] = price_str
-                params["timeInForce"] = "GTC"  # Good Till Cancel
+                params["timeInForce"] = "GTC"
             
-            # Submit order to Binance
             result = await client.futures_create_order(**params)
             
             order_id = result.get("orderId", "N/A")
@@ -183,7 +188,6 @@ class OrderManager:
     async def _submit_dry_run_order(self, signal: TradeSignal, 
                              quantity: float, price: Optional[float]) -> OrderResult:
         """Simulate order submission in dry-run mode"""
-        
         logger.info(f"[DRY RUN] Would submit order: {signal.symbol} {signal.action} "
                    f"qty={quantity} price={price}")
         
@@ -196,7 +200,6 @@ class OrderManager:
     
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
         """Cancel an open order"""
-        
         if self.dry_run:
             logger.info(f"[DRY RUN] Would cancel order: {order_id}")
             return True
@@ -211,8 +214,7 @@ class OrderManager:
             return False
     
     async def get_open_orders(self, symbol: Optional[str] = None) -> Dict:
-        """Get all open orders, optionally filtered by symbol"""
-        
+        """Get all open orders"""
         if self.dry_run:
             logger.debug(f"[DRY RUN] Would query open orders for {symbol}")
             return {}
@@ -228,22 +230,34 @@ class OrderManager:
             logger.error(f"Failed to get open orders: {e}")
             return {}
     
+    async def get_open_positions(self, symbols: list[str] = None) -> dict[str, Any]:
+        """Get all open positions"""
+        if self.dry_run:
+            logger.debug(f"[DRY RUN] Would query open positions for {symbols}")
+            return {}
+
+        try:
+            client = await self._get_client()
+            positions = await client.futures_position_information()
+            
+            open_positions = {}
+            for pos in positions:
+                if float(pos.get("positionAmt", 0)) != 0:
+                    if symbols and pos["symbol"] not in symbols:
+                        continue
+                    open_positions[pos["symbol"]] = pos
+            
+            return open_positions
+        except Exception as e:
+            logger.error(f"Failed to get open positions: {e}")
+            return {}
+    
     async def close_position(
         self,
         symbol: str,
         position: Position
     ) -> OrderResult:
-        """
-        Pozisyon kapat (Market order ile)
-
-        Args:
-            symbol: Trading sembolü
-            position: Kapatılacak pozisyon
-
-        Returns:
-            OrderResult
-        """
-
+        """Pozisyon kapat (Market order ile)"""
         if self.dry_run:
             logger.info(f"[DRY RUN] Would close position: {symbol} {position.side} qty={position.quantity}")
             return OrderResult(
@@ -255,19 +269,11 @@ class OrderManager:
 
         try:
             client = await self._get_client()
-
-            # Side belirle (LONG için SELL, SHORT için BUY)
             side = "SELL" if position.side == "LONG" else "BUY"
-
-            # Quantity hazırla
             qty_str = self._round_quantity(symbol, position.quantity)
 
-            logger.info(
-                f"Closing {position.side} position: {symbol} "
-                f"qty={qty_str} type=MARKET"
-            )
+            logger.info(f"Closing {position.side} position: {symbol} qty={qty_str} type=MARKET")
 
-            # Market order ile kapat
             result = await client.futures_create_order(
                 symbol=symbol,
                 side=side,
@@ -302,7 +308,6 @@ class OrderManager:
 
     async def set_stop_loss(self, position: Position, stop_price: float) -> bool:
         """Set or update stop-loss order for a position"""
-        
         if self.dry_run:
             logger.info(f"[DRY RUN] Would set stop-loss for {position.symbol} at {stop_price}")
             return True
@@ -310,7 +315,7 @@ class OrderManager:
         try:
             client = await self._get_client()
             side = "SELL" if position.side == "LONG" else "BUY"
-            position_side = position.side  # LONG or SHORT
+            position_side = position.side
             
             await client.futures_create_order(
                 symbol=position.symbol,
@@ -327,7 +332,7 @@ class OrderManager:
             return False
     
     async def close_all_positions(self) -> int:
-        """Close all open positions. Returns number of positions closed"""
+        """Close all open positions"""
         if self.dry_run:
             logger.info("[DRY RUN] Would close all positions")
             return 0
@@ -374,21 +379,10 @@ class SlippageController:
     
     def check_slippage(self, expected_price: float, 
                       executed_price: float, side: str) -> bool:
-        """
-        Check if slippage is within acceptable limits.
-        
-        Args:
-            expected_price: The expected fill price
-            executed_price: The actual fill price
-            side: "LONG" or "SHORT"
-        
-        Returns:
-            True if slippage is acceptable, False otherwise
-        """
-        
+        """Check if slippage is within acceptable limits"""
         if side == "LONG":
             slippage_pct = ((executed_price - expected_price) / expected_price) * 100
-        else:  # SHORT
+        else:
             slippage_pct = ((expected_price - executed_price) / expected_price) * 100
         
         acceptable = slippage_pct <= self.max_slippage_pct

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from core.state import MarketRegime, VolatilityRegime
+from core.state_manager import MarketRegime, VolatilityRegime
 
 logger = logging.getLogger("autobot.feature.regime")
 

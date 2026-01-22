@@ -1,6 +1,12 @@
 """
-AUTOBOT Notification Manager - PRODUCTION READY
+AUTOBOT Notification Manager - PRODUCTION READY v1.3
 Fixed event loop conflict for async environments
+
+FIXES:
+- Use cached telegram token from settings
+- Improved thread pool bot creation
+- Better error handling
+- Cleanup on shutdown
 """
 import logging
 import asyncio
@@ -10,9 +16,10 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from enum import Enum
-from threading import Lock
+from threading import Lock, RLock
 from pathlib import Path
 import concurrent.futures
+import atexit
 
 try:
     from telegram import Bot
@@ -26,7 +33,7 @@ except ImportError as e:
 
 from config.settings import settings
 
-logger = logging.getLogger("autobot.notification.telegram")
+logger = logging.getLogger("autobot.notifier")
 
 RATE_LIMITS = {
     "INFO": {"max_per_minute": 60},
@@ -36,12 +43,14 @@ RATE_LIMITS = {
     "HEARTBEAT": {"max_per_hour": 24},
 }
 
+
 class NotificationPriority(Enum):
     CRITICAL = "CRITICAL"
     ERROR = "ERROR"
     WARNING = "WARNING"
     INFO = "INFO"
     HEARTBEAT = "HEARTBEAT"
+
 
 @dataclass
 class NotificationMessage:
@@ -60,15 +69,16 @@ class NotificationMessage:
         """Escape special HTML characters"""
         if not isinstance(text, str):
             return str(text)
-        return (text
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace('"', "&quot;")
-                .replace("'", "&apos;"))
+        return (
+            text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+        )
 
     def format(self) -> str:
-        # Format using HTML tags (more reliable than Markdown)
         title_escaped = self._escape_html(self.title)
         message_escaped = self._escape_html(self.message)
 
@@ -95,10 +105,11 @@ class NotificationMessage:
                 key_parts.append(f"{k}={v}")
         return ":".join(key_parts)
 
-class TelegramNotificationManager:
+
+class NotificationManager:
     _instance = None
     _lock = Lock()
-    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="telegram")
+    _executor = None
     
     def __new__(cls):
         if cls._instance is None:
@@ -106,19 +117,39 @@ class TelegramNotificationManager:
         return cls._instance
     
     def __init__(self):
-        with TelegramNotificationManager._lock:
+        with NotificationManager._lock:
             if hasattr(self, '_initialized') and self._initialized:
                 return
+            
+            self._rate_limit_lock = RLock()
+            self._bot_lock = RLock()
             self._bot = None
             self._chat_id = None
             self._enabled = settings.TELEGRAM_NOTIFICATIONS_ENABLED and TELEGRAM_AVAILABLE
             self._send_history = {p.value: [] for p in NotificationPriority}
             self._critical_latch = {}
             self._latch_file = Path("/root/autobot_system/.critical_latch.json")
+            
+            # Create thread pool executor
+            if NotificationManager._executor is None:
+                NotificationManager._executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=2,
+                    thread_name_prefix="telegram"
+                )
+                # Register cleanup on exit
+                atexit.register(self._cleanup_executor)
+            
             self._load_latch_state()
             if self._enabled:
                 self._initialize_bot()
             self._initialized = True
+    
+    @staticmethod
+    def _cleanup_executor():
+        """Cleanup thread pool executor on exit"""
+        if NotificationManager._executor is not None:
+            NotificationManager._executor.shutdown(wait=False)
+            NotificationManager._executor = None
     
     def _load_latch_state(self):
         try:
@@ -137,7 +168,11 @@ class TelegramNotificationManager:
     
     def _initialize_bot(self):
         try:
-            token = settings.TELEGRAM_BOT_TOKEN.get_secret_value()
+            # Use cached token from settings
+            token = settings.telegram_bot_token
+            if not token:
+                raise ValueError("Telegram bot token not configured")
+            
             self._bot = Bot(token=token)
             self._chat_id = settings.TELEGRAM_CHAT_ID
             logger.info(f"Telegram bot initialized: chat_id={self._chat_id}")
@@ -146,21 +181,23 @@ class TelegramNotificationManager:
             self._enabled = False
     
     def _check_latch(self, event_key: str) -> bool:
-        if event_key not in self._critical_latch:
-            return False
-        last_sent = self._critical_latch[event_key]
-        if datetime.now(timezone.utc) - last_sent > timedelta(hours=24):
-            del self._critical_latch[event_key]
-            self._save_latch_state()
-            return False
-        return True
+        with self._bot_lock:
+            if event_key not in self._critical_latch:
+                return False
+            last_sent = self._critical_latch[event_key]
+            if datetime.now(timezone.utc) - last_sent > timedelta(hours=24):
+                del self._critical_latch[event_key]
+                self._save_latch_state()
+                return False
+            return True
     
     def _set_latch(self, event_key: str):
-        self._critical_latch[event_key] = datetime.now(timezone.utc)
-        self._save_latch_state()
+        with self._bot_lock:
+            self._critical_latch[event_key] = datetime.now(timezone.utc)
+            self._save_latch_state()
     
     def _check_rate_limit(self, priority: NotificationPriority) -> bool:
-        with TelegramNotificationManager._lock:
+        with self._rate_limit_lock:
             now = time.time()
             history = self._send_history[priority.value]
             cutoff = now - 3600
@@ -191,7 +228,14 @@ class TelegramNotificationManager:
             return False
         try:
             message = notification.format()
-            await self._bot.send_message(chat_id=self._chat_id, text=message, parse_mode='HTML')
+            await self._bot.send_message(
+                chat_id=self._chat_id, 
+                text=message, 
+                parse_mode='HTML',
+                read_timeout=10,
+                write_timeout=10,
+                connect_timeout=10
+            )
             logger.info(f"[TELEGRAM SENT] [{notification.priority.value}] {notification.title}")
             return True
         except Exception as e:
@@ -200,45 +244,56 @@ class TelegramNotificationManager:
             return False
     
     def _run_in_thread(self, notification: NotificationMessage) -> bool:
-        """Run async send in a separate thread - FIXED with per-thread bot"""
+        """Run async send in a separate thread - FIXED with proper cleanup"""
         from telegram import Bot
-        from config.settings import settings
         
         bot = None
+        loop = None
         try:
-            token = settings.TELEGRAM_BOT_TOKEN.get_secret_value()
+            # Get credentials from cached settings
+            token = settings.telegram_bot_token
             chat_id = settings.TELEGRAM_CHAT_ID
             
-            # Create new bot for this thread (avoids event loop conflicts)
+            if not token:
+                logger.error("Telegram token not configured")
+                return False
+            
+            # Create new bot for this thread
             bot = Bot(token=token)
             
+            # Create new event loop for this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            try:
-                async def send_with_timeout():
-                    try:
-                        msg = notification.format()
-                        await bot.send_message(
-                            chat_id=chat_id, 
-                            text=msg, 
-                            parse_mode='HTML',
-                            read_timeout=10,
-                            write_timeout=10,
-                            connect_timeout=10
-                        )
-                        return True
-                    except Exception as e:
-                        raise e
-                
-                result = loop.run_until_complete(send_with_timeout())
-                if result:
-                    logger.info(f"[TELEGRAM SENT] [{notification.priority.value}] {notification.title}")
-                return result
-            except Exception as e:
-                logger.error(f"Telegram send error in thread: {type(e).__name__}: {e}")
-                return False
-            finally:
-                # Clean up pending tasks
+            
+            async def send_with_timeout():
+                msg = notification.format()
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=msg,
+                    parse_mode='HTML',
+                    read_timeout=10,
+                    write_timeout=10,
+                    connect_timeout=10
+                )
+                return True
+            
+            result = loop.run_until_complete(
+                asyncio.wait_for(send_with_timeout(), timeout=12.0)
+            )
+            
+            if result:
+                logger.info(f"[TELEGRAM SENT] [{notification.priority.value}] {notification.title}")
+            return result
+            
+        except asyncio.TimeoutError:
+            logger.error(f"Telegram send timeout: {notification.title}")
+            return False
+        except Exception as e:
+            logger.error(f"Telegram send error in thread: {type(e).__name__}: {e}")
+            return False
+        finally:
+            # Cleanup: Cancel pending tasks
+            if loop is not None:
                 try:
                     pending = asyncio.all_tasks(loop)
                     if pending:
@@ -247,26 +302,24 @@ class TelegramNotificationManager:
                         loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
                 except Exception:
                     pass
+                
                 try:
                     loop.run_until_complete(loop.shutdown_asyncgens())
                 except Exception:
                     pass
+                
                 loop.close()
-        except Exception as e:
-            logger.error(f"Thread execution error: {type(e).__name__}: {e}")
-            self._log_notification(notification)
-            return False
-        finally:
-            # Shutdown bot properly
+            
+            # Shutdown bot
             if bot is not None:
                 try:
                     # Bot needs async shutdown
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+                    bot_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(bot_loop)
                     try:
-                        loop.run_until_complete(bot.shutdown())
+                        bot_loop.run_until_complete(bot.shutdown())
                     finally:
-                        loop.close()
+                        bot_loop.close()
                 except Exception:
                     pass
     
@@ -285,11 +338,11 @@ class TelegramNotificationManager:
             # Check if we're in an async context
             try:
                 loop = asyncio.get_running_loop()
-                # We're in an async context, submit to thread pool
+                # Submit to thread pool
                 future = self._executor.submit(self._run_in_thread, notification)
-                result = future.result(timeout=12.0)
+                result = future.result(timeout=15.0)
                 if result:
-                    with TelegramNotificationManager._lock:
+                    with self._rate_limit_lock:
                         self._send_history[notification.priority.value].append(time.time())
                     if notification.priority == NotificationPriority.CRITICAL:
                         self._set_latch(notification.get_event_key())
@@ -310,8 +363,10 @@ class TelegramNotificationManager:
             NotificationPriority.INFO: logging.INFO,
             NotificationPriority.HEARTBEAT: logging.INFO,
         }
-        logger.log(log_level.get(notification.priority, logging.INFO),
-            f"[{notification.priority.value}] {notification.title}: {notification.message}")
+        logger.log(
+            log_level.get(notification.priority, logging.INFO),
+            f"[{notification.priority.value}] {notification.title}: {notification.message}"
+        )
     
     def send_critical(self, title: str, message: str, **metadata):
         notification = NotificationMessage(
@@ -359,12 +414,16 @@ class TelegramNotificationManager:
         return self.send_sync(notification)
     
     def reset_daily_latch(self):
-        self._critical_latch.clear()
-        self._save_latch_state()
-        logger.info("CRITICAL latch reset")
+        with self._bot_lock:
+            self._critical_latch.clear()
+            self._save_latch_state()
+            logger.info("CRITICAL latch reset")
     
     def shutdown(self):
         """Cleanup on shutdown"""
-        self._executor.shutdown(wait=True)
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
 
-notification_manager = TelegramNotificationManager()
+
+notification_manager = NotificationManager()

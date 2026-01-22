@@ -5,7 +5,7 @@ Aggregates signals and produces final bias scores
 import logging
 from typing import List, Dict, Optional
 
-from core.state import TradeSignal, MarketRegime
+from core.state_manager import TradeSignal, MarketRegime
 
 logger = logging.getLogger("autobot.decision.bias")
 

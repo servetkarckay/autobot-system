@@ -7,7 +7,7 @@ import logging
 from typing import Dict
 from dataclasses import dataclass
 
-from core.state import TradeSignal, VetoResult
+from core.state_manager import TradeSignal, VetoResult
 from core.execution.exit_manager import exit_manager
 
 logger = logging.getLogger("autobot.risk.adx_gate")

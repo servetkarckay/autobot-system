@@ -4,10 +4,11 @@ Immutable rule-based decision making system
 """
 import logging
 from typing import Dict, List, Optional, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 
-from core.state import TradeSignal, MarketRegime
+from core.state_manager import TradeSignal, MarketRegime
+from core.constants import Indicator
 
 logger = logging.getLogger("autobot.decision.rule_engine")
 
@@ -27,6 +28,7 @@ class Rule:
     condition: Callable
     bias_score: float
     allowed_regimes: List[MarketRegime]
+    required_features: List[Indicator] = field(default_factory=list)
     min_confidence: float = 0.5
     rule_type: str = RuleType.MEAN_REVERSION
 
@@ -36,6 +38,7 @@ class RuleEngine:
     
     def __init__(self):
         self._rules: Dict[str, Rule] = {}
+        self.required_features: set[Indicator] = set()
         self._strategy_weights: Dict[str, float] = {}
         self._sideways_veto_enabled = True
         self._vetoed_rules_in_sideways = [RuleType.TREND, RuleType.BREAKOUT, RuleType.COMBO]
@@ -43,6 +46,8 @@ class RuleEngine:
     
     def register_rule(self, rule: Rule):
         self._rules[rule.name] = rule
+        for feature in rule.required_features:
+            self.required_features.add(feature)
         logger.debug(f"Rule registered: {rule.name} (type: {rule.rule_type})")
     
     def register_strategy(self, strategy_name: str, initial_weight: float = 1.0):

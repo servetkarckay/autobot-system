@@ -12,9 +12,9 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from collections import defaultdict
 
-from core.data_pipeline.websocket_collector import WebSocketCollector, MarketData, StreamType, LatencyMetrics
+from core.data_pipeline.websocket_collector import WebSocketCollector, MarketData, LatencyMetrics
 from core.data_pipeline.data_validator import DataValidator
-from core.feature_engine.indicators import IndicatorCalculator
+from core.feature_engine.incremental_indicators import IncrementalIndicatorCalculator, IncrementalEMA
 from core.feature_engine.regime_detector import RegimeDetector
 from core.decision.rule_engine import RuleEngine
 from core.decision.bias_generator import BiasAggregator
@@ -23,10 +23,10 @@ from core.risk.position_sizer import position_sizer
 from core.execution.order_manager import OrderManager
 from core.execution.exit_manager import exit_manager, ExitSignal
 from core.risk.adx_entry_gate import adx_entry_gate
-from core.state.state_persistence import state_manager
-from core.state import SystemState, SystemStatus, MarketRegime, TradeSignal, Position
+from core.state_manager import state_manager
+from core.state_manager import SystemState, SystemStatus, MarketRegime, TradeSignal, Position
 from config.settings import settings
-from core.notification.telegram_manager import notification_manager, NotificationPriority
+from core.notifier import notification_manager, NotificationPriority
 from strategies.trading_rules import register_all_rules
 
 logger = logging.getLogger("autobot.data.event_engine")
@@ -43,8 +43,8 @@ class TradingDecisionEngine:
         self.ws_collector = WebSocketCollector()
         self.data_validator = DataValidator()
 
-        # Feature calculation
-        self.indicator_calculator = IndicatorCalculator()
+        # Feature calculation (New Incremental Calculator)
+        self.indicator_calculator: Optional[IncrementalIndicatorCalculator] = None
         self.regime_detector = RegimeDetector()
 
         # Decision making
@@ -77,6 +77,12 @@ class TradingDecisionEngine:
         # Decision throttling (avoid excessive decisions)
         self._last_decision_time: Dict[str, datetime] = {}
         self._min_decision_interval_seconds = 1  # Max one decision per second per symbol
+        
+        # Real-time price tracking (from book ticker)
+        self._realtime_prices: Dict[str, float] = {}
+        
+        # Decision throttling - separate for kline and book ticker
+        self._min_decision_interval_book = 30  # 30 seconds for book ticker events
 
         # Register event handlers
         self._register_event_handlers()
@@ -95,8 +101,11 @@ class TradingDecisionEngine:
     def _register_event_handlers(self):
         """Register callbacks for WebSocket events"""
 
-        # Kline close events trigger decisions
+        # Kline events update OHLCV data
         self.ws_collector.on_kline(self._on_kline_event)
+
+        # Book ticker events trigger continuous signal evaluation
+        self.ws_collector.on_book_ticker(self._on_book_ticker_event)
 
         # Error handling
         self.ws_collector.on_error(self._on_error_event)
@@ -108,6 +117,12 @@ class TradingDecisionEngine:
         logger.info(f"[ENGINE] Starting trading engine for {len(symbols)} symbols")
         logger.info(f"[ENGINE] Symbols: {symbols[:10]}..." if len(symbols) > 10 else f"[ENGINE] Symbols: {symbols}")
         logger.info("=" * 60)
+
+        # Initialize the incremental calculator with symbols
+        self.indicator_calculator = IncrementalIndicatorCalculator(symbols)
+        for symbol in symbols:
+            self.indicator_calculator.add_indicator(symbol, 'EMA_20', IncrementalEMA(period=20))
+            self.indicator_calculator.add_indicator(symbol, 'EMA_50', IncrementalEMA(period=50))
 
         # Load system state
         self._state = state_manager.load_state()
@@ -121,15 +136,68 @@ class TradingDecisionEngine:
         else:
             logger.info(f"[ENGINE] Loaded state: {len(self._state.open_positions)} open positions")
 
-        # Subscribe to data streams
-        self.ws_collector.subscribe_klines(symbols, interval="1m")
+        # Reconcile positions with the exchange before starting
+        await self._reconcile_positions(symbols)
+
+        # Load historical data and seed indicators
+        await self._load_historical_data_and_seed_indicators(symbols)
+
+        # Subscribe to data streams after seeding
+        self.ws_collector.subscribe_klines(symbols, interval="4h")
         self.ws_collector.subscribe_book_ticker(symbols)
 
         # Start WebSocket and event loop
         await self.ws_collector.start()
 
+
+    async def _reconcile_positions(self, symbols: list[str]):
+        """Compare local state with exchange positions and sync them."""
+        logger.info("[RECONCILE] Starting position reconciliation...")
+
+        try:
+            # Fetch current open positions from the exchange
+            exchange_positions = await self.order_manager.get_open_positions(symbols)
+            local_positions = self._state.open_positions
+
+            logger.info(f"[RECONCILE] Found {len(exchange_positions)} positions on exchange and {len(local_positions)} in local state.")
+
+            # 1. Check for positions on the exchange that are NOT in the local state
+            for symbol, pos_data in exchange_positions.items():
+                if symbol not in local_positions:
+                    logger.warning(f"[RECONCILE] Found position for {symbol} on exchange but not in local state. ADDING to state.")
+                    
+                    quantity = float(pos_data.get("positionAmt", 0))
+                    position = Position(
+                        symbol=symbol,
+                        side="LONG" if quantity > 0 else "SHORT",
+                        entry_price=float(pos_data.get("entryPrice", 0)),
+                        quantity=abs(quantity),
+                        current_price=float(pos_data.get("markPrice", 0)),
+                        entry_time=datetime.fromtimestamp(int(pos_data.get("updateTime", 0)) / 1000, tz=timezone.utc),
+                        # Stop-loss and other metadata will be default, needs monitoring to adjust
+                    )
+                    self._state.open_positions[symbol] = position
+                    notification_manager.send_warning(
+                        title="Position Reconciled",
+                        message=f"Found and synced a {position.side} position for {symbol} from the exchange."
+                    )
+
+            # 2. Check for positions in the local state that are NOT on the exchange
+            local_symbols = list(local_positions.keys())
+            for symbol in local_symbols:
+                if symbol not in exchange_positions:
+                    logger.warning(f"[RECONCILE] Found position for {symbol} in local state but not on exchange. REMOVING from state.")
+                    del self._state.open_positions[symbol]
+            
+            state_manager.save_state(self._state)
+            logger.info("[RECONCILE] Position reconciliation complete.")
+
+        except Exception as e:
+            logger.error(f"[RECONCILE] Error during position reconciliation: {e}", exc_info=True)
+            notification_manager.send_critical(title="Reconciliation Failed", message=str(e))
+
     async def _on_kline_event(self, data: MarketData):
-        """Handle kline event (event-driven trigger)"""
+        """Handle kline event - update OHLCV buffer"""
 
         # Validate data first
         is_valid, reason = self.data_validator.validate(data)
@@ -138,21 +206,15 @@ class TradingDecisionEngine:
             return
 
         # Update OHLCV buffer
-        buffer_size_before = len(self._ohlcv_buffers.get(data.symbol, []))
         self._update_ohlcv_buffer(data.symbol, data)
-        buffer_size_after = len(self._ohlcv_buffers[data.symbol])
+        
+        # Update real-time price
+        self._realtime_prices[data.symbol] = data.close
 
-        # Debug: Buffer güncellemesi
-        if data.symbol in self._ohlcv_buffers and buffer_size_after != buffer_size_before:
-            logger.debug(
-                f"[DATA] {data.symbol}: Buffer updated ({buffer_size_after} bars) | "
-                f"O={data.open:.2f} H={data.high:.2f} L={data.low:.2f} C={data.close:.2f} "
-                f"V={data.volume:.2f} Closed={data.is_kline_closed}"
-            )
-
-        # Only make decisions on kline close
+        # Trigger evaluation on kline close
         if data.is_kline_closed:
-            await self._on_kline_close(data)
+            logger.debug(f"[KLINE CLOSED] {data.symbol}: Triggering evaluation")
+            await self._evaluate_signal(data.symbol, data.close, trigger="kline_close")
 
 
     def _cleanup_feature_cache(self):
@@ -165,40 +227,45 @@ class TradingDecisionEngine:
                 del self._feature_cache[key]
             logger.debug(f"[CLEANUP] Removed {len(items_to_remove)} old feature cache entries")
 
-    async def _on_kline_close(self, data: MarketData):
-        """Handle kline close event - DECISION TRIGGER"""
+    async def _evaluate_signal(self, symbol: str, price: float, trigger: str = "unknown"):
+        """Evaluate signal with throttling - works for both kline and book ticker events"""
 
-        symbol = data.symbol
         now = datetime.now(timezone.utc)
 
-        # Check throttling
+        # Check throttling based on trigger type
         last_time = self._last_decision_time.get(symbol)
+        
+        if trigger == "book_ticker":
+            min_interval = self._min_decision_interval_book
+        else:  # kline_close
+            min_interval = self._min_decision_interval_seconds
 
         if last_time:
             elapsed = (now - last_time).total_seconds()
-            if elapsed < self._min_decision_interval_seconds:
-                logger.debug(f"[THROTTLE] {symbol}: Skipped ({elapsed:.2f}s < {self._min_decision_interval_seconds}s)")
+            if elapsed < min_interval:
+                logger.debug(f"[THROTTLE] {symbol}: Skipped ({elapsed:.1f}s < {min_interval}s) trigger={trigger}")
                 return
 
         self._last_decision_time[symbol] = now
 
-        # Open position check
-        has_position = symbol in self._state.open_positions
-
-        logger.info("=" * 80)
-        logger.info(f"[KLINE CLOSE] {symbol} @ {data.close:.2f} | Has Position: {has_position}")
-        logger.info("=" * 80)
+        # Log evaluation trigger (only for kline close to reduce noise)
+        if trigger == "kline_close":
+            logger.info("=" * 80)
+            logger.info(f"[EVALUATE] {symbol} @ {price:.2f} | Trigger: {trigger} | Has Position: {symbol in self._state.open_positions}")
+            logger.info("=" * 80)
+        else:
+            logger.debug(f"[EVALUATE] {symbol} @ {price:.2f} | Trigger: {trigger}")
 
         # Step 1: Calculate features
         logger.debug(f"[STEP 1] {symbol}: Calculating features...")
-        features = await self._calculate_features(symbol)
+        features = await self._calculate_features(symbol, price, trigger)
 
         if not features:
             logger.warning(f"[STEP 1] {symbol}: No features calculated (insufficient data)")
             return
 
         # Add timestamp for exit manager
-        features["timestamp"] = int(data.timestamp.timestamp() * 1000)
+        features["timestamp"] = int(now.timestamp() * 1000)
 
         # Debug: Feature özeti
         logger.debug(
@@ -232,7 +299,7 @@ class TradingDecisionEngine:
             logger.warning(f"[REGIME CHANGE] {symbol}: {old_regime.value} → {current_regime.value}")
 
         # Update exit manager with ADX (for momentum loss exit)
-        exit_manager.update_symbol_adx(symbol, features.get("adx", 0), int(data.timestamp.timestamp() * 1000))
+        exit_manager.update_symbol_adx(symbol, features.get("adx", 0), int(now.timestamp() * 1000))
         # Step 3: Generate signal from Decision Engine
         logger.debug(f"[STEP 3] {symbol}: Evaluating trading rules...")
         signal = self.rule_engine.evaluate(
@@ -280,7 +347,7 @@ class TradingDecisionEngine:
                 signal=signal,
                 state=self._state,
                 proposed_quantity=proposed_quantity,
-                proposed_price=data.close
+                proposed_price=price
             )
 
             logger.debug(
@@ -291,7 +358,7 @@ class TradingDecisionEngine:
             if veto_result.approved:
                 # Step 6: Execute approved signal
                 logger.debug(f"[STEP 6] {symbol}: Executing signal...")
-                await self._execute_signal(signal, data.close, 0.0)
+                await self._execute_signal(signal, price, 0.0)
             else:
                 logger.warning(f"[VETO REJECTED] {symbol}: {veto_result.veto_reason} at {veto_result.veto_stage}")
 
@@ -311,54 +378,151 @@ class TradingDecisionEngine:
         # ============================================================
         if symbol in self._state.open_positions:
             logger.debug(f"[STEP EXIT] {symbol}: Running exit checks...")
-            await self._check_exits(symbol, data, features)
+            await self._check_exits(symbol, price, features)
         else:
             logger.debug(f"[STEP EXIT] {symbol}: No open position, skip exit check")
 
-    async def _calculate_features(self, symbol: str) -> Optional[Dict]:
-        """Calculate technical features for a symbol"""
+    async def _on_book_ticker_event(self, data: MarketData):
+        """Handle book ticker event - continuous scanning"""
 
-        buffer = self._ohlcv_buffers.get(symbol)
-        if not buffer or len(buffer) < 50:
-            logger.debug(f"[FEATURES] {symbol}: Insufficient buffer ({len(buffer) if buffer else 0} < 50)")
+        # Get mid price from bid/ask
+        if data.best_bid and data.best_ask:
+            mid_price = (data.best_bid + data.best_ask) / 2
+        elif data.best_bid:
+            mid_price = data.best_bid
+        elif data.best_ask:
+            mid_price = data.best_ask
+        else:
+            return  # No valid price
+
+        # Update real-time price
+        old_price = self._realtime_prices.get(data.symbol)
+        self._realtime_prices[data.symbol] = mid_price
+
+        # Only log if price changed significantly (>0.01%)
+        if old_price is None or abs(mid_price - old_price) / old_price > 0.0001:
+            logger.debug(f"[BOOK TICKER] {data.symbol}: {mid_price:.2f} (bid={data.best_bid:.2f}, ask={data.best_ask:.2f})")
+
+        # Trigger signal evaluation with throttling
+        await self._evaluate_signal(data.symbol, mid_price, trigger="book_ticker")
+
+    async def _calculate_features(self, symbol: str, price: float, trigger: str) -> Optional[Dict]:
+        """
+        Calculate technical features using the incremental calculator.
+        - For 'book_ticker' triggers, only update fast, incremental indicators.
+        - For 'kline_close' triggers, update all indicators.
+        """
+        if not self.indicator_calculator or not self.indicator_calculator.is_seeded(symbol):
+            logger.debug(f"[FEATURES] {symbol}: Calculator not ready or not seeded.")
             return None
 
-        # Convert buffer to pandas DataFrame
+        buffer = self._ohlcv_buffers.get(symbol)
+        if not buffer:
+            return None
+        
         try:
             import pandas as pd
-            import numpy as np
-
+            # Create DataFrame from buffer for complex indicators
             df_data = {
-                "open": [k["open"] for k in buffer],
-                "high": [k["high"] for k in buffer],
-                "low": [k["low"] for k in buffer],
-                "close": [k["close"] for k in buffer],
+                "open": [k["open"] for k in buffer], "high": [k["high"] for k in buffer],
+                "low": [k["low"] for k in buffer], "close": [k["close"] for k in buffer],
                 "volume": [k["volume"] for k in buffer]
             }
-
             df = pd.DataFrame(df_data)
 
-            logger.debug(f"[FEATURES] {symbol}: Calculating indicators from {len(df)} bars...")
-
-            # Calculate indicators
-            features = self.indicator_calculator.calculate_all(df)
-
-            # Add activation threshold
-            features["activation_threshold"] = settings.ACTIVATION_THRESHOLD
-
-            # Cache features
-            self._feature_cache[symbol] = features
+            # Always update the last candle's close price with the real-time price
+            df.loc[df.index[-1], "close"] = price
             
-            # Periodic cleanup
-            if len(self._feature_cache) > 100:
-                self._cleanup_feature_cache()
-
-            logger.debug(f"[FEATURES] {symbol}: {len(features)} indicators calculated")
+            # Use the new calculator
+            features = self.indicator_calculator.calculate_features(
+                symbol,
+                new_price=price,
+                full_data=df  # Provide the full dataframe for non-incremental indicators
+            )
+            
+            # --- This part can be expanded in IncrementalIndicatorCalculator ---
+            # For now, manually add other indicators needed by strategies
+            import pandas_ta as ta
+            df.ta.adx(length=14, append=True)
+            df.ta.atr(length=14, append=True)
+            df.ta.donchian(lower_length=20, upper_length=20, append=True)
+            
+            features['adx'] = df.iloc[-1]['ADX_14']
+            features['atr'] = df.iloc[-1]['ATRr_14']
+            features['breakout_20_long'] = price > df.iloc[-2]['DCU_20_20'] # Previous bar's high
+            features['breakout_20_short'] = price < df.iloc[-2]['DCL_20_20'] # Previous bar's low
+            # ---
+            
+            features["activation_threshold"] = settings.ACTIVATION_THRESHOLD
+            self._feature_cache[symbol] = features
             return features
 
         except Exception as e:
-            logger.error(f"[FEATURES] {symbol}: Error - {e}")
+            logger.error(f"[FEATURES] {symbol}: Error in new calculation - {e}", exc_info=True)
             return None
+
+    async def _load_historical_data_and_seed_indicators(self, symbols: list):
+        """Load historical kline data and use it to seed the incremental indicators."""
+        import aiohttp
+        import pandas as pd
+        
+        logger.info("[HISTORICAL] Loading historical data and seeding indicators...")
+        
+        for symbol in symbols:
+            try:
+                # Fetch historical data (same as before)
+                interval = "4h"
+                limit = 200  # Need enough data for indicator seeding
+                end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+                
+                if settings.BINANCE_TESTNET:
+                    url = f"https://testnet.binancefuture.com/fapi/v1/klines"
+                else:
+                    url = f"https://fapi.binance.com/fapi/v1/klines"
+                
+                params = {"symbol": symbol, "interval": interval, "limit": limit, "endTime": end_time}
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, params=params) as resp:
+                        data = await resp.json()
+                
+                if not isinstance(data, list) or len(data) < 50:
+                    logger.warning(f"[HISTORICAL] {symbol}: Failed to load sufficient data ({len(data)} bars)")
+                    continue
+                
+                # Populate OHLCV buffer
+                for k in data:
+                    kline_data = {
+                        "timestamp": datetime.fromtimestamp(k[0] / 1000, tz=timezone.utc),
+                        "open": float(k[1]), "high": float(k[2]), "low": float(k[3]),
+                        "close": float(k[4]), "volume": float(k[5])
+                    }
+                    self._ohlcv_buffers[symbol].append(kline_data)
+                
+                # Create DataFrame for seeding
+                df_data = {
+                    "open": [k["open"] for k in self._ohlcv_buffers[symbol]],
+                    "high": [k["high"] for k in self._ohlcv_buffers[symbol]],
+                    "low": [k["low"] for k in self._ohlcv_buffers[symbol]],
+                    "close": [k["close"] for k in self._ohlcv_buffers[symbol]],
+                    "volume": [k["volume"] for k in self._ohlcv_buffers[symbol]]
+                }
+                df = pd.DataFrame(df_data)
+
+                # Seed the indicators for the symbol
+                self.indicator_calculator.seed_indicators(symbol, df)
+                
+                logger.info(
+                    f"[HISTORICAL] {symbol}: Loaded and seeded with {len(df)} bars. "
+                    f"Seeded: {self.indicator_calculator.is_seeded(symbol)}"
+                )
+                
+                await asyncio.sleep(0.1)  # Rate limiting
+                
+            except Exception as e:
+                logger.error(f"[HISTORICAL] {symbol}: Error during data loading/seeding - {e}", exc_info=True)
+        
+        logger.info(f"[HISTORICAL] Completed loading for {len(symbols)} symbols")
 
     def _update_ohlcv_buffer(self, symbol: str, data: MarketData):
         """Update OHLCV buffer for a symbol"""
@@ -481,7 +645,7 @@ class TradingDecisionEngine:
                 stop_loss = price + (2 * atr)
 
             # Import ExitMetadata
-            from core.state import ExitMetadata
+            from core.state_manager import ExitMetadata
 
             # Create Position object with exit_metadata
             position = Position(
@@ -519,11 +683,11 @@ class TradingDecisionEngine:
         else:
             logger.error(f"[ORDER FAILED] {symbol}: {result.error_message}")
 
-    async def _check_exits(self, symbol: str, data: MarketData, features: Dict):
+    async def _check_exits(self, symbol: str, price: float, features: Dict):
         """
         Açık pozisyonlar için exit kontrolü
-
-        Her kline close'da çağrılır
+        
+        Continuous evaluation - her book ticker event'inde çağrılabilir
         """
 
         position = self._state.open_positions.get(symbol)
@@ -532,24 +696,24 @@ class TradingDecisionEngine:
 
         # Position'u güncelle (current price)
         old_price = position.current_price
-        position.current_price = data.close
+        position.current_price = price
 
         # Unrealized PnL hesapla
         if position.side == "LONG":
-            position.unrealized_pnl = (data.close - position.entry_price) * position.quantity
+            position.unrealized_pnl = (price - position.entry_price) * position.quantity
         else:
-            position.unrealized_pnl = (position.entry_price - data.close) * position.quantity
+            position.unrealized_pnl = (position.entry_price - price) * position.quantity
 
         pnl_pct = 0
         if position.side == "LONG":
-            pnl_pct = (data.close - position.entry_price) / position.entry_price * 100
+            pnl_pct = (price - position.entry_price) / position.entry_price * 100
         else:
-            pnl_pct = (position.entry_price - data.close) / position.entry_price * 100
+            pnl_pct = (position.entry_price - price) / position.entry_price * 100
 
         logger.debug(
             f"[POSITION UPDATE] {symbol} {position.side}: "
             f"Entry={position.entry_price:.2f} | "
-            f"Old={old_price:.2f} | New={data.close:.2f} | "
+            f"Old={old_price:.2f} | New={price:.2f} | "
             f"PnL=${position.unrealized_pnl:.2f} ({pnl_pct:+.2f}%)"
         )
 

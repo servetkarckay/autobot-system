@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, Optional, Any
 from pathlib import Path
 
-from core.notification.telegram_manager import notification_manager, NotificationPriority
+from core.notifier import notification_manager, NotificationPriority
 
 logger = logging.getLogger("autobot.metadata")
 
