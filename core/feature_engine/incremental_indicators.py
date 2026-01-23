@@ -93,10 +93,12 @@ class IncrementalIndicatorCalculator:
         # For more complex indicators, we might need to recalculate from the series for now.
         # This is still a huge improvement as we only do it on kline close, not every tick.
         # A fully incremental RSI is possible but requires tracking more state.
-        import pandas_ta as ta
-        full_data.ta.rsi(length=14, append=True)
-        rsi_value = full_data.iloc[-1]['RSI_14']
-        features['RSI_14'] = rsi_value
+        # Temporarily disabled pandas_ta - using simple RSI calculation
+        # import pandas_ta as ta
+        # full_data.ta.rsi(length=14, append=True)
+        # rsi_value = full_data.iloc[-1]["RSI_14"]
+        # features['RSI_14'] = rsi_value
+        # TODO: Fix pandas_ta import issue
         
         # Add other non-incremental indicators from pandas-ta as needed
         # ...

@@ -43,6 +43,7 @@ class RuleEngine:
         self._sideways_veto_enabled = True
         self._vetoed_rules_in_sideways = [RuleType.TREND, RuleType.BREAKOUT, RuleType.COMBO]
         self._allowed_in_sideways = [RuleType.MEAN_REVERSION]
+        self.regime: MarketRegime = MarketRegime.UNKNOWN
     
     def register_rule(self, rule: Rule):
         self._rules[rule.name] = rule
@@ -65,10 +66,51 @@ class RuleEngine:
         if current_regime == MarketRegime.RANGE:
             if rule.rule_type in self._vetoed_rules_in_sideways:
                 return True
+        elif current_regime == MarketRegime.BEAR_TREND:
+            # In bear trend, veto LONG breakouts
+            if rule.rule_type == "BREAKOUT" and "LONG" in rule.name.upper():
+                return True
         return False
+    
+    def _get_veto_reason(self, rule: Rule, current_regime: MarketRegime) -> str:
+        """Get detailed veto reason based on rule type and regime"""
+        if current_regime == MarketRegime.RANGE:
+            if rule.rule_type == "TREND":
+                return "TREND_NOT_ALLOWED_IN_RANGE"
+            elif rule.rule_type == "BREAKOUT":
+                return "BREAKOUT_NOT_CONFIRMED_IN_RANGE"
+            elif rule.rule_type == "COMBO":
+                return "COMBO_NOT_ALLOWED_IN_RANGE"
+        elif current_regime == MarketRegime.BEAR_TREND:
+            if rule.rule_type == "BREAKOUT" and "LONG" in rule.name.upper():
+                return "LONG_BREAKOUT_IN_BEAR_TREND"
+            elif rule.rule_type == "BREAKOUT" and "SHORT" in rule.name.upper():
+                return "SHORT_BREAKOUT_IN_BEAR_TREND"
+        return f"{rule.rule_type}_VETOED"
+
     
     def evaluate(self, symbol: str, current_regime: MarketRegime,
                 features: Dict, strategy_name: str = "default") -> TradeSignal:
+        # Update rule engine's regime
+        self.regime = current_regime
+        
+        # Log regime source
+        global_regime = MarketRegime.UNKNOWN  # Will be updated from global state if available
+        try:
+            from core.state_manager import StateManager
+            state_mgr = StateManager()
+            state = state_mgr.load_state()
+            if state and symbol in state.symbol_regimes:
+                global_regime = state.symbol_regimes[symbol]
+        except Exception:
+            pass
+        
+        logger.debug(
+            f"[REGIME_SOURCE] "
+            f"rule_engine_regime={self.regime.value} "
+            f"global_regime={global_regime.value}"
+        )
+        
         total_bias = 0.0
         active_rules = 0
         vetoed_rules = 0
@@ -79,6 +121,8 @@ class RuleEngine:
                 continue
             if self._is_rule_vetoed(rule, current_regime):
                 vetoed_rules += 1
+                veto_reason = self._get_veto_reason(rule, current_regime)
+                logger.debug(f"[VETO] {rule.name}: {veto_reason} | regime_seen={current_regime.value}")
                 continue
             try:
                 if rule.condition(features):

@@ -287,7 +287,11 @@ class TradingDecisionEngine:
         logger.info(f"[REGIME] {symbol}: {current_regime.value} | Volatility: {volatility_regime.value}")
 
         # Update system state (symbol bazlı regime)
-        old_regime = self._state.get_symbol_regime(symbol)
+        try:
+            old_regime = self._state.get_symbol_regime(symbol)
+        except RuntimeError:
+            # First time detecting regime for this symbol
+            old_regime = MarketRegime.UNKNOWN
         self._state.update_symbol_regime(symbol, current_regime)
         self._state.current_regime = current_regime  # Legacy global regime
         self._state.last_update = now
@@ -443,14 +447,28 @@ class TradingDecisionEngine:
             # --- This part can be expanded in IncrementalIndicatorCalculator ---
             # For now, manually add other indicators needed by strategies
             import pandas_ta as ta
-            df.ta.adx(length=14, append=True)
-            df.ta.atr(length=14, append=True)
-            df.ta.donchian(lower_length=20, upper_length=20, append=True)
             
-            features['adx'] = df.iloc[-1]['ADX_14']
-            features['atr'] = df.iloc[-1]['ATRr_14']
-            features['breakout_20_long'] = price > df.iloc[-2]['DCU_20_20'] # Previous bar's high
-            features['breakout_20_short'] = price < df.iloc[-2]['DCL_20_20'] # Previous bar's low
+            # Calculate ADX
+            adx_result = ta.adx(df["high"], df["low"], df["close"], length=14)
+            if adx_result is not None and not adx_result.empty:
+                df = pd.concat([df, adx_result], axis=1)
+                features["adx"] = df["ADX_14"].iloc[-1] if "ADX_14" in df else 25
+            else:
+                features["adx"] = 25  # Default ADX value
+            
+            # Calculate ATR  
+            atr_result = ta.atr(df["high"], df["low"], df["close"], length=14)
+            if atr_result is not None and not atr_result.empty:
+                df["ATRr_14"] = atr_result
+                features["atr"] = df["ATRr_14"].iloc[-1] if "ATRr_14" in df else df["close"].iloc[-1] * 0.02
+            else:
+                features["atr"] = df["close"].iloc[-1] * 0.02
+            
+            # Calculate Donchian channels manually
+            df["DCU_20_20"] = df["high"].rolling(window=20).max()
+            df["DCL_20_20"] = df["low"].rolling(window=20).min()
+            features["breakout_20_long"] = price > df.iloc[-2]["DCU_20_20"] if len(df) >= 2 else False
+            features["breakout_20_short"] = price < df.iloc[-2]["DCL_20_20"] if len(df) >= 2 else False
             # ---
             
             features["activation_threshold"] = settings.ACTIVATION_THRESHOLD

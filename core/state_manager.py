@@ -118,7 +118,9 @@ class SystemState:
         self.symbol_regimes[symbol] = regime
 
     def get_symbol_regime(self, symbol: str) -> MarketRegime:
-        return self.symbol_regimes.get(symbol, MarketRegime.UNKNOWN)
+        if symbol not in self.symbol_regimes:
+            raise RuntimeError(f"Regime state missing for symbol: {symbol}")
+        return self.symbol_regimes[symbol]
 
     def to_dict(self) -> dict:
         data = asdict(self)
