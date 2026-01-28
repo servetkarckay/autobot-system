@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     TRADING_SYMBOLS: list[str] = ["ETHUSDT"]
     MAX_POSITIONS: int = 1
     MAX_POSITION_SIZE_USDT: float = 1000.0
+    LEVERAGE: int = 10
+    ACCOUNT_EQUITY_USDT: float = 1000.0
     MAX_DRAWDOWN_PCT: float = 15.0
     DAILY_LOSS_LIMIT_PCT: float = 3.0
     

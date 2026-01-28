@@ -143,7 +143,7 @@ class TradingDecisionEngine:
         await self._load_historical_data_and_seed_indicators(symbols)
 
         # Subscribe to data streams after seeding
-        self.ws_collector.subscribe_klines(symbols, interval="4h")
+        self.ws_collector.subscribe_klines(symbols, interval="1h")
         self.ws_collector.subscribe_book_ticker(symbols)
 
         # Start WebSocket and event loop
@@ -489,7 +489,7 @@ class TradingDecisionEngine:
         for symbol in symbols:
             try:
                 # Fetch historical data (same as before)
-                interval = "4h"
+                interval = "1h"
                 limit = 200  # Need enough data for indicator seeding
                 end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
                 

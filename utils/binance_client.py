@@ -34,8 +34,12 @@ class BinanceClient:
     
     def get_account_info(self) -> Optional[Dict]:
         """Get account information including balances and positions"""
-        # Implementation would call /fapi/v2/account
-        return {}
+        try:
+            info = self._client.get_account()
+            return info
+        except Exception as e:
+            logger.error(f"Failed to get account info: {e}")
+            return {}
     
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
         """Get all open orders"""

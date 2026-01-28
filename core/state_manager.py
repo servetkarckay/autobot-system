@@ -99,8 +99,8 @@ class SystemState:
     current_regime: MarketRegime = MarketRegime.UNKNOWN
     volatility_regime: VolatilityRegime = VolatilityRegime.NORMAL
     symbol_regimes: Dict[str, MarketRegime] = field(default_factory=dict)
-    equity: float = 0.0
-    peak_equity: float = 0.0
+    equity: float = settings.ACCOUNT_EQUITY_USDT
+    peak_equity: float = settings.ACCOUNT_EQUITY_USDT
     current_drawdown_pct: float = 0.0
     daily_pnl: float = 0.0
     daily_pnl_pct: float = 0.0
