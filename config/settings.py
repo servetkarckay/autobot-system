@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     MAX_STRATEGY_WEIGHT: float = 1.5
     MIN_STOP_LOSS_MULTIPLIER: float = 2.0
     MAX_STOP_LOSS_MULTIPLIER: float = 4.0
+    
+    # Trailing Stop Settings
+    TRAILING_STOP_ACTIVATION_PCT: float = 2.0  # Activate trailing at X% profit
+    BREAK_EVEN_PCT: float = 2.0  # Move stop to entry at X% profit
+    TRAILING_STOP_RATE: float = 0.5  # Move stop by X% per 1% additional profit
+    
     PERFORMANCE_WINDOW_SIZE: int = 30
     
     # ============ Data Pipeline Configuration ============

@@ -113,11 +113,11 @@ class TradingDecisionEngine:
 
     def _calculate_adaptive_stop_loss(self, entry_price, atr, side, volatility_regime):
         if volatility_regime == 'HIGH':
-            mult = 3.5
+            mult = settings.MAX_STOP_LOSS_MULTIPLIER
         elif volatility_regime == 'LOW':
-            mult = 1.5
+            mult = settings.MIN_STOP_LOSS_MULTIPLIER
         else:
-            mult = 2.5
+            mult = settings.STOP_LOSS_ATR_MULTIPLIER
         if side == 'LONG':
             return entry_price - (mult * atr)
         else:
@@ -131,13 +131,13 @@ class TradingDecisionEngine:
         if pct > position.highest_profit_pct:
             position.highest_profit_pct = pct
         if pct >= position.trailing_stop_activation_pct:
-            if pct >= 2.0 and not position.break_even_triggered:
+            if pct >= settings.BREAK_EVEN_PCT and not position.break_even_triggered:
                 position.stop_loss_price = position.entry_price
                 position.break_even_triggered = True
                 logger.info('[BREAK-EVEN] ' + str(position.symbol) + ': Stop at entry')
             elif position.break_even_triggered:
-                extra = pct - 2.0
-                adj = extra * 0.5 / 100
+                extra = pct - settings.BREAK_EVEN_PCT
+                adj = extra * settings.TRAILING_STOP_RATE / 100
                 if position.side == 'LONG':
                     new_sl = position.entry_price + (position.entry_price * adj)
                     if new_sl > position.stop_loss_price:
@@ -716,7 +716,7 @@ class TradingDecisionEngine:
                 initial_stop_loss=stop_loss,
                 highest_profit_pct=0.0,
                 break_even_triggered=False,
-                trailing_stop_activation_pct=2.0,
+                trailing_stop_activation_pct=settings.TRAILING_STOP_ACTIVATION_PCT,
                 entry_time=datetime.now(timezone.utc),
                 regime_at_entry=self._state.current_regime,
                 unrealized_pnl=0.0,
