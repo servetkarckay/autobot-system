@@ -110,6 +110,43 @@ class TradingDecisionEngine:
         # Error handling
         self.ws_collector.on_error(self._on_error_event)
 
+
+    def _calculate_adaptive_stop_loss(self, entry_price, atr, side, volatility_regime):
+        if volatility_regime == 'HIGH':
+            mult = 3.5
+        elif volatility_regime == 'LOW':
+            mult = 1.5
+        else:
+            mult = 2.5
+        if side == 'LONG':
+            return entry_price - (mult * atr)
+        else:
+            return entry_price + (mult * atr)
+
+    def _update_trailing_stop(self, position, current_price, atr):
+        if position.side == 'LONG':
+            pct = (current_price - position.entry_price) / position.entry_price * 100
+        else:
+            pct = (position.entry_price - current_price) / position.entry_price * 100
+        if pct > position.highest_profit_pct:
+            position.highest_profit_pct = pct
+        if pct >= position.trailing_stop_activation_pct:
+            if pct >= 2.0 and not position.break_even_triggered:
+                position.stop_loss_price = position.entry_price
+                position.break_even_triggered = True
+                logger.info('[BREAK-EVEN] ' + str(position.symbol) + ': Stop at entry')
+            elif position.break_even_triggered:
+                extra = pct - 2.0
+                adj = extra * 0.5 / 100
+                if position.side == 'LONG':
+                    new_sl = position.entry_price + (position.entry_price * adj)
+                    if new_sl > position.stop_loss_price:
+                        position.stop_loss_price = new_sl
+                else:
+                    new_sl = position.entry_price - (position.entry_price * adj)
+                    if new_sl < position.stop_loss_price:
+                        position.stop_loss_price = new_sl
+
     async def start(self, symbols: list):
         """Start the event-driven trading engine"""
 
@@ -467,6 +504,9 @@ class TradingDecisionEngine:
             # Calculate Donchian channels manually
             df["DCU_20_20"] = df["high"].rolling(window=20).max()
             df["DCL_20_20"] = df["low"].rolling(window=20).min()
+            features["high_20"] = df["DCU_20_20"].iloc[-1] if len(df) >= 20 else 0.0
+            features["low_20"] = df["DCL_20_20"].iloc[-1] if len(df) >= 20 else 0.0
+            logger.debug(f"[DONCHIAN] {symbol}: high_20={features.get('high_20', 0):.2f}, low_20={features.get('low_20', 0):.2f}")
             features["breakout_20_long"] = price > df.iloc[-2]["DCU_20_20"] if len(df) >= 2 else False
             features["breakout_20_short"] = price < df.iloc[-2]["DCL_20_20"] if len(df) >= 2 else False
             # ---
@@ -489,8 +529,8 @@ class TradingDecisionEngine:
         for symbol in symbols:
             try:
                 # Fetch historical data (same as before)
-                interval = "1h"
-                limit = 200  # Need enough data for indicator seeding
+                interval = "15m"
+                limit = 500  # Need enough data for 20-period indicators for indicator seeding
                 end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
                 
                 if settings.BINANCE_TESTNET:
@@ -673,6 +713,10 @@ class TradingDecisionEngine:
                 quantity=quantity,
                 current_price=price,
                 stop_loss_price=stop_loss,
+                initial_stop_loss=stop_loss,
+                highest_profit_pct=0.0,
+                break_even_triggered=False,
+                trailing_stop_activation_pct=2.0,
                 entry_time=datetime.now(timezone.utc),
                 regime_at_entry=self._state.current_regime,
                 unrealized_pnl=0.0,

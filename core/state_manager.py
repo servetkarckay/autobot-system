@@ -85,6 +85,10 @@ class Position:
     unrealized_pnl: float
     stop_loss_price: float | None = None
     take_profit_price: float | None = None
+    initial_stop_loss: float | None = None  # For trailing stop calculation
+    highest_profit_pct: float = 0.0  # Track highest profit for trailing stop
+    break_even_triggered: bool = False  # Track if break-even was activated
+    trailing_stop_activation_pct: float = 2.0  # Activate trailing at X% profit
     entry_time: datetime = field(default_factory=datetime.utcnow)
     strategy_name: str = ""
     regime_at_entry: MarketRegime = MarketRegime.UNKNOWN
