@@ -38,9 +38,9 @@ class PositionSizer:
     
     def __init__(
         self,
-        risk_per_trade_pct: float = 1.0,
+        risk_per_trade_pct: float = 100.0,
         atr_multiplier: float = 2.0,
-        min_quantity_usdt: float = 5.0,
+        min_quantity_usdt: float = 1.0,
         max_position_usdt: float = 1000.0
     ):
         if not 0 < risk_per_trade_pct <= 100:

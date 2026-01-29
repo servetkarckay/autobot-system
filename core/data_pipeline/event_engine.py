@@ -143,7 +143,7 @@ class TradingDecisionEngine:
         await self._load_historical_data_and_seed_indicators(symbols)
 
         # Subscribe to data streams after seeding
-        self.ws_collector.subscribe_klines(symbols, interval="1h")
+        self.ws_collector.subscribe_klines(symbols, interval="15m")
         self.ws_collector.subscribe_book_ticker(symbols)
 
         # Start WebSocket and event loop
