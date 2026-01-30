@@ -281,7 +281,11 @@ class WebSocketCollector:
     
     def on_kline(self, callback: Callable[[MarketData], None]):
         """Register callback for kline events"""
+        import logging
+        logger = logging.getLogger("autobot.data.websocket")
+        logger.info(f"[on_kline] Registering callback: {callback is not None}")
         self._on_kline_callback = callback
+        logger.info(f"[on_kline] After register: {self._on_kline_callback is not None}")
     
     def on_trade(self, callback: Callable[[MarketData], None]):
         """Register callback for trade events"""
@@ -420,6 +424,11 @@ class WebSocketCollector:
             
             # Route to appropriate handler by event type
             event_type = data.get("e", "")
+            
+            # DEBUG: Log routing with instance ID
+            import logging
+            logger = logging.getLogger("autobot.data.websocket")
+            logger.info(f"[ROUTE] ws_id={id(self)}, event_type={event_type}, has_kline={self._on_kline_callback is not None}")
             
             if event_type == "kline" and self._on_kline_callback:
                 await self._handle_kline(data, received_at, latency_ms)

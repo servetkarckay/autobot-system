@@ -50,8 +50,8 @@ class Settings(BaseSettings):
     TELEGRAM_NOTIFICATIONS_ENABLED: bool = True
     
     # ============ System Configuration ============
-    ENVIRONMENT: Literal["DRY_RUN", "TESTNET", "LIVE"] = "DRY_RUN"
-    DRY_RUN: bool = True
+    ENVIRONMENT: Literal["DRY_RUN", "TESTNET", "LIVE"] = "TESTNET"
+    DRY_RUN: bool = False
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     LOG_FORMAT: str = "json"
     

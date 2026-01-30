@@ -18,8 +18,11 @@ from datetime import datetime
 import time
 
 from binance import AsyncClient
+import websockets
+import json
 from binance.exceptions import BinanceAPIException
 from config.settings import settings
+from .rate_limiter import rate_limiter
 from core.state_manager import TradeSignal, Position
 
 logger = logging.getLogger("autobot.execution.order")
@@ -51,6 +54,9 @@ class OrderManager:
         self._hedge_mode = None
         self._leverage_set: Dict[str, bool] = {}
         self._stop_orders: Dict[str, str] = {}  # symbol -> stop_order_id
+        self._user_data_stream_key: Optional[str] = None  # Binance listen key
+        self._user_data_stream_task: Optional[asyncio.Task] = None  # Listener task
+        self._execution_report_callbacks = []  # Callbacks for execution reports
         logger.info(f"OrderManager initialized (dry_run={dry_run}, leverage={settings.LEVERAGE}x)")
 
     async def set_leverage(self, symbol: str) -> bool:
@@ -66,6 +72,8 @@ class OrderManager:
             client = await self._get_client()
             leverage = settings.LEVERAGE
             
+            # Rate limiter: wait before leverage change
+            await rate_limiter.wait_if_needed("futures_change_leverage")
             result = await client.futures_change_leverage(
                 symbol=symbol,
                 leverage=leverage
@@ -158,6 +166,8 @@ class OrderManager:
         """Check if sufficient margin is available before opening position"""
         try:
             client = await self._get_client()
+            # Rate limiter: wait before account query
+            await rate_limiter.wait_if_needed("futures_account")
             account = await client.get_account()
 
             # Get USDT available balance
@@ -168,6 +178,8 @@ class OrderManager:
                     break
 
             # Get current positions margin usage
+            # Rate limiter: wait before position query
+            await rate_limiter.wait_if_needed("futures_position_information")
             positions = await client.futures_position_information(symbol=symbol)
             current_position_margin = 0.0
             leverage = settings.LEVERAGE
@@ -188,7 +200,7 @@ class OrderManager:
 
         except Exception as e:
             logger.error(f"[MARGIN CHECK] Error: {e}")
-            return True, "Margin check skipped (API error)"
+            return False, "API Error - cannot verify margin"
 
     async def submit_order(self, signal: TradeSignal, quantity: float,
                     price: Optional[float] = None) -> OrderResult:
@@ -242,6 +254,8 @@ class OrderManager:
                 params["price"] = price_str
                 params["timeInForce"] = "GTC"
 
+            # Rate limiter: wait before order submission
+            await rate_limiter.wait_if_needed("futures_create_order")
             result = await client.futures_create_order(**params)
 
             order_id = result.get("orderId", "N/A")
@@ -283,6 +297,8 @@ class OrderManager:
             # Determine side for closing (opposite of position side)
             close_side = "SELL" if position.side == "LONG" else "BUY"
             
+            # Rate limiter: wait before order submission
+            await rate_limiter.wait_if_needed("futures_create_order")
             result = await client.futures_create_order(
                 symbol=symbol,
                 side=close_side,
@@ -306,6 +322,33 @@ class OrderManager:
         except Exception as e:
             logger.error(f"[CLOSE FAILED] {symbol}: {e}")
             return OrderResult(success=False, error_message=str(e))
+
+
+    async def confirm_order_on_exchange(self, symbol: str, expected_quantity: float) -> bool:
+        """Emirin Binance'da gerçekleştiğini doğrula"""
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Would confirm order for {symbol}")
+            return True
+        
+        try:
+            client = await self._get_client()
+            # Rate limiter: wait before position query
+            await rate_limiter.wait_if_needed("futures_position_information")
+            positions = await client.futures_position_information(symbol=symbol)
+            
+            for pos in positions:
+                if pos.get('symbol') == symbol:
+                    amt = float(pos.get('positionAmt', 0))
+                    if abs(amt) > 0.0000001:
+                        logger.info(f"[ORDER CONFIRMED] {symbol}: Position confirmed on exchange, amount={amt}")
+                        return True
+            
+            logger.warning(f"[ORDER NOT FOUND] {symbol}: Order executed but position not found on exchange")
+            return False
+            
+        except Exception as e:
+            logger.error(f"[ORDER CONFIRM ERROR] {symbol}: {e}")
+            return False
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
         """Cancel an open order"""
@@ -351,6 +394,8 @@ class OrderManager:
         
         try:
             client = await self._get_client()
+            # Rate limiter: wait before position query
+            await rate_limiter.wait_if_needed("futures_position_information")
             positions = await client.futures_position_information()
             
             result = {}
@@ -390,6 +435,8 @@ class OrderManager:
             stop_price_str = self._round_price(symbol, stop_price)
             qty_str = self._round_quantity(symbol, quantity)
             
+            # Rate limiter: wait before order submission
+            await rate_limiter.wait_if_needed("futures_create_order")
             result = await client.futures_create_order(
                 symbol=symbol,
                 side='SELL' if position_side == 'LONG' else 'BUY',
@@ -440,6 +487,8 @@ class OrderManager:
             client = await self._get_client()
             close_side = 'SELL' if position.side == 'LONG' else 'BUY'
             
+            # Rate limiter: wait before order submission
+            await rate_limiter.wait_if_needed("futures_create_order")
             result = await client.futures_create_order(
                 symbol=symbol,
                 side=close_side,
@@ -472,3 +521,134 @@ class OrderManager:
         except Exception as e:
             logger.error(f'[CANCEL FAILED] {symbol}: {e}')
             return False
+
+
+    # ==================== SEVIYE 2: USER DATA STREAM ====================
+    
+    async def start_user_data_stream(self) -> bool:
+        """Binance User Data Stream'i başlat - Real-time order updates"""
+        if self.dry_run:
+            logger.info("[DRY RUN] Would start User Data Stream")
+            return True
+            
+        try:
+            client = await self._get_client()
+            response = await client.futures_stream_get_listen_key()
+            self._user_data_stream_key = response
+            logger.info(f"[USER DATA STREAM] Listen key obtained: {self._user_data_stream_key[:20]}...")
+            
+            # Start listener task
+            self._user_data_stream_task = asyncio.create_task(self._user_data_stream_listener())
+            # Start keep-alive task
+            asyncio.create_task(self.keep_alive_listen_key())
+            logger.info("[USER DATA STREAM] Listener task started")
+            return True
+            
+        except BinanceAPIException as e:
+            logger.error(f"[USER DATA STREAM] Failed to get listen key: {e.code} - {e.message}")
+            return False
+        except Exception as e:
+            logger.error(f"[USER DATA STREAM] Error: {e}")
+            return False
+    
+    async def stop_user_data_stream(self):
+        """User Data Stream'i durdur"""
+        if self._user_data_stream_task:
+            self._user_data_stream_task.cancel()
+            try:
+                await self._user_data_stream_task
+            except asyncio.CancelledError:
+                pass
+                
+        if self._user_data_stream_key and self._client:
+            try:
+                await self._client.futures_stream_close_listen_key(listenKey=self._user_data_stream_key)
+                logger.info("[USER DATA STREAM] Listen key closed")
+            except Exception as e:
+                logger.warning(f"[USER DATA STREAM] Failed to close listen key: {e}")
+    
+    async def _user_data_stream_listener(self):
+        """Binance User Data Stream'den execution report dinle"""
+        uri = f"wss://fstream.binance.com/ws/{self._user_data_stream_key}"
+        
+        while True:
+            try:
+                async with websockets.connect(uri) as ws:
+                    logger.info("[USER DATA STREAM] Connected to Binance User Data Stream")
+                    
+                    while True:
+                        message = await ws.recv()
+                        data = json.loads(message)
+                        
+                        # Execution event'ini işle
+                        if data.get('e') == 'ORDER_TRADE_UPDATE':
+                            await self._handle_execution_report(data.get('o', {}))
+                            
+                        # Account update
+                        elif data.get('e') == 'ACCOUNT_UPDATE':
+                            await self._handle_account_update(data.get('a', {}))
+                            
+                        # Listen key expired (24 hours)
+                        elif data.get('e') == 'listenKeyExpired':
+                            logger.warning("[USER DATA STREAM] Listen key expired, refreshing...")
+                            await self.stop_user_data_stream()
+                            await self.start_user_data_stream()
+                            
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning("[USER DATA STREAM] Connection closed, reconnecting...")
+                await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"[USER DATA STREAM] Error: {e}")
+                await asyncio.sleep(10)
+    
+    async def _handle_execution_report(self, order_data: dict):
+        """Execution report'ini işle ve local state'i güncelle"""
+        order_id = str(order_data.get('i'))
+        symbol = order_data.get('s')
+        order_status = order_data.get('X')
+        execution_type = order_data.get('x')
+        
+        logger.debug(f"[EXECUTION REPORT] {symbol} Order {order_id}: Status={order_status}, ExecType={execution_type}")
+        
+        # Sadece önemli durumları işle
+        if order_status in ['FILLED', 'PARTIALLY_FILLED', 'CANCELED', 'REJECTED', 'EXPIRED']:
+            # Callback'leri çağır
+            for callback in self._execution_report_callbacks:
+                try:
+                    await callback(order_data)
+                except Exception as e:
+                    logger.error(f"[EXECUTION REPORT] Callback error: {e}")
+        
+        # Filled emir için log
+        if execution_type == 'TRADE':
+            executed_qty = float(order_data.get('l', 0))
+            executed_price = float(order_data.get('L', 0))
+            logger.info(f"[ORDER FILLED] {symbol} {order_id}: {executed_qty} @ {executed_price}")
+    
+    async def _handle_account_update(self, account_data: dict):
+        """Account update'ini işle"""
+        positions = account_data.get('P', [])
+        for pos in positions:
+            symbol = pos.get('s')
+            position_amt = float(pos.get('pa', 0))
+            unrealized_pnl = float(up = pos.get('up', 0)) if 'up' in pos_data else 0
+            
+            if abs(position_amt) > 0:
+                logger.debug(f"[ACCOUNT UPDATE] {symbol}: {position_amt} contracts, PnL: {unrealized_pnl}")
+    
+    def on_execution_report(self, callback):
+        """Execution report için callback ekle"""
+        self._execution_report_callbacks.append(callback)
+        
+    async def keep_alive_listen_key(self):
+        """Listen key'i canlı tut (her 30 dakikada bir ping)"""
+        while True:
+            try:
+                await asyncio.sleep(1800)  # 30 dakika
+                if self._user_data_stream_key and self._client:
+                    await self._client.futures_stream_keepalive(listenKey=self._user_data_stream_key)
+                    logger.debug("[USER DATA STREAM] Listen key kept alive")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[USER DATA STREAM] Keep-alive error: {e}")

@@ -77,6 +77,7 @@ class TradingDecisionEngine:
         # Decision throttling (avoid excessive decisions)
         self._last_decision_time: Dict[str, datetime] = {}
         self._min_decision_interval_seconds = 1  # Max one decision per second per symbol
+        self._min_decision_interval_book = 30  # 30 seconds for book ticker events
         
         # Real-time price tracking (from book ticker)
         self._realtime_prices: Dict[str, float] = {}
@@ -180,7 +181,7 @@ class TradingDecisionEngine:
         await self._load_historical_data_and_seed_indicators(symbols)
 
         # Subscribe to data streams after seeding
-        self.ws_collector.subscribe_klines(symbols, interval="15m")
+        self.ws_collector.subscribe_klines(symbols, interval="1m")
         self.ws_collector.subscribe_book_ticker(symbols)
 
         # Start WebSocket and event loop
@@ -501,6 +502,18 @@ class TradingDecisionEngine:
             else:
                 features["atr"] = df["close"].iloc[-1] * 0.02
             
+
+            # Calculate RSI
+            try:
+                rsi_result = ta.rsi(df["close"], length=14)
+                if rsi_result is not None and not rsi_result.empty:
+                    df["RSI_14"] = rsi_result
+                    features["rsi"] = float(df["RSI_14"].iloc[-1])
+                else:
+                    features["rsi"] = 50.0
+            except Exception as e:
+                features["rsi"] = 50.0
+
             # Calculate Donchian channels manually
             df["DCU_20_20"] = df["high"].rolling(window=20).max()
             df["DCL_20_20"] = df["low"].rolling(window=20).min()
