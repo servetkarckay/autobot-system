@@ -523,6 +523,24 @@ class TradingDecisionEngine:
             features["breakout_20_long"] = price > df.iloc[-2]["DCU_20_20"] if len(df) >= 2 else False
             features["breakout_20_short"] = price < df.iloc[-2]["DCL_20_20"] if len(df) >= 2 else False
             # ---
+
+            # Merge incremental calculator results (uppercase keys to lowercase)
+            if 'EMA_20' in features:
+                features['ema_20'] = features['EMA_20']
+            if 'EMA_50' in features:
+                features['ema_50'] = features['EMA_50']
+            
+            # Calculate ema_20_above_ema_50 for trend rules
+            features['ema_20_above_ema_50'] = features.get('ema_20', 0) > features.get('ema_50', 0)
+            
+            # Calculate Bollinger Bands middle for combo rules
+            bb_result = ta.bbands(df["close"], length=20)
+            if bb_result is not None and not bb_result.empty:
+                df = pd.concat([df, bb_result], axis=1)
+                features['bb_middle'] = df['BBL_20_2.0'].iloc[-1] if 'BBL_20_2.0' in df else price
+            else:
+                features['bb_middle'] = price
+
             
             features["activation_threshold"] = settings.ACTIVATION_THRESHOLD
             self._feature_cache[symbol] = features
