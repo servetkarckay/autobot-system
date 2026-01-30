@@ -723,6 +723,20 @@ class TradingDecisionEngine:
                 exit_metadata=ExitMetadata()  # Initialize with empty metadata
             )
 
+            # BINANCE STOP LOSS EMRİ GÖNDER - Pozisyon açıldığında
+            stop_result = await self.order_manager.submit_stop_loss_order(
+                symbol=symbol,
+                position_side=position_side,
+                stop_price=stop_loss,
+                quantity=quantity
+            )
+            
+            if stop_result.success:
+                position.stop_order_id = stop_result.order_id
+                logger.info(f"[STOP ORDER SET] {symbol}: stop_order_id={stop_result.order_id}")
+            else:
+                logger.warning(f"[STOP ORDER FAILED] {symbol}: {stop_result.error_message} - Position without exchange protection!")
+
             # Add to state
             self._state.open_positions[symbol] = position
 
@@ -759,6 +773,22 @@ class TradingDecisionEngine:
         # Position'u güncelle (current price)
         old_price = position.current_price
         position.current_price = price
+        
+        # TRAILING STOP GÜNCELLEME - Her fiyat değişiminde çalıştır
+        atr = features.get("atr", 0)
+        old_stop = position.stop_loss_price  # Save for comparison
+        if atr > 0:
+            self._update_trailing_stop(position, price, atr)
+            logger.debug(f"[TRAILING STOP] {symbol}: SL=${position.stop_loss_price:.4f} | Highest Profit={position.highest_profit_pct:.2f}% | Break-Even={position.break_even_triggered}")
+            
+            # Stop değiştiyse Binance"a güncelle
+            if position.stop_loss_price != old_stop and position.stop_loss_price is not None:
+                await self.order_manager.update_stop_loss(
+                    symbol=symbol,
+                    position_side=position.side,
+                    new_stop_price=position.stop_loss_price,
+                    quantity=position.quantity
+                )
 
         # Unrealized PnL hesapla
         if position.side == "LONG":

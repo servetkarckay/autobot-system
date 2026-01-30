@@ -84,6 +84,7 @@ class Position:
     current_price: float
     unrealized_pnl: float
     stop_loss_price: float | None = None
+    stop_order_id: str | None = None  # Binance stop loss order ID
     take_profit_price: float | None = None
     initial_stop_loss: float | None = None  # For trailing stop calculation
     highest_profit_pct: float = 0.0  # Track highest profit for trailing stop
@@ -140,6 +141,12 @@ class SystemState:
                 "symbol": pos.symbol, "side": pos.side, "quantity": pos.quantity,
                 "entry_price": pos.entry_price, "current_price": pos.current_price,
                 "unrealized_pnl": pos.unrealized_pnl, "stop_loss_price": pos.stop_loss_price,
+                "stop_order_id": pos.stop_order_id,
+                "take_profit_price": pos.take_profit_price,
+                "initial_stop_loss": pos.initial_stop_loss,
+                "highest_profit_pct": pos.highest_profit_pct,
+                "break_even_triggered": pos.break_even_triggered,
+                "trailing_stop_activation_pct": pos.trailing_stop_activation_pct,
                 "take_profit_price": pos.take_profit_price, "entry_time": pos.entry_time.isoformat(),
                 "strategy_name": pos.strategy_name, "regime_at_entry": pos.regime_at_entry.value,
                 "exit_metadata": None
@@ -160,6 +167,17 @@ class SystemState:
             if isinstance(pos_data.get("regime_at_entry"), str):
                 pos_data["regime_at_entry"] = MarketRegime[pos_data["regime_at_entry"]]
             if "exit_metadata" not in pos_data or pos_data["exit_metadata"] is None:
+                pos_data["exit_metadata"] = ExitMetadata()
+            if "stop_order_id" not in pos_data:
+                pos_data["stop_order_id"] = None
+            if "initial_stop_loss" not in pos_data or pos_data["initial_stop_loss"] is None:
+                pos_data["initial_stop_loss"] = pos_data.get("stop_loss_price")
+            if "highest_profit_pct" not in pos_data:
+                pos_data["highest_profit_pct"] = 0.0
+            if "break_even_triggered" not in pos_data:
+                pos_data["break_even_triggered"] = False
+            if "trailing_stop_activation_pct" not in pos_data:
+                pos_data["trailing_stop_activation_pct"] = 2.0
                 pos_data["exit_metadata"] = ExitMetadata()
             positions[symbol] = Position(**pos_data)
         data["open_positions"] = positions

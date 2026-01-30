@@ -50,6 +50,7 @@ class OrderManager:
         self._symbol_filters: Dict[str, Dict] = {}
         self._hedge_mode = None
         self._leverage_set: Dict[str, bool] = {}
+        self._stop_orders: Dict[str, str] = {}  # symbol -> stop_order_id
         logger.info(f"OrderManager initialized (dry_run={dry_run}, leverage={settings.LEVERAGE}x)")
 
     async def set_leverage(self, symbol: str) -> bool:
@@ -269,6 +270,58 @@ class OrderManager:
                 error_message=str(e)
             )
 
+
+    async def close_position(self, symbol: str, position) -> OrderResult:
+        """Close an existing position"""
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Would close position for {symbol}")
+            return OrderResult(success=True, order_id=f"DRY_CLOSE_{int(time.time() * 1000)}")
+        
+        try:
+            client = await self._get_client()
+            
+            # Determine side for closing (opposite of position side)
+            close_side = "SELL" if position.side == "LONG" else "BUY"
+            
+            result = await client.futures_create_order(
+                symbol=symbol,
+                side=close_side,
+                type="MARKET",
+                quantity=position.quantity,
+                positionSide=position.side
+            )
+            
+            order_id = result.get("orderId", "N/A")
+            executed_price = float(result.get("avgPrice", position.current_price))
+            
+            logger.info(f"[CLOSE FILLED] {symbol} {position.side} ID={order_id} @ {executed_price}")
+            
+            return OrderResult(
+                success=True,
+                order_id=str(order_id),
+                executed_price=executed_price,
+                executed_quantity=position.quantity
+            )
+            
+        except Exception as e:
+            logger.error(f"[CLOSE FAILED] {symbol}: {e}")
+            return OrderResult(success=False, error_message=str(e))
+
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+        """Cancel an open order"""
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Would cancel order {order_id} for {symbol}")
+            return True
+        
+        try:
+            client = await self._get_client()
+            await client.futures_cancel_order(symbol=symbol, orderId=int(order_id))
+            logger.info(f"[CANCEL] Order {order_id} canceled for {symbol}")
+            return True
+        except Exception as e:
+            logger.error(f"[CANCEL FAILED] {symbol}: {e}")
+            return False
+
     async def _submit_dry_run_order(self, signal: TradeSignal,
                              quantity: float, price: Optional[float]) -> OrderResult:
         """Simulate order submission in dry-run mode"""
@@ -325,3 +378,97 @@ class OrderManager:
         except Exception as e:
             logger.error(f"[POSITIONS] Error: {e}")
             return {}
+
+    async def submit_stop_loss_order(self, symbol: str, position_side: str, 
+                                     stop_price: float, quantity: float) -> OrderResult:
+        if self.dry_run:
+            logger.info(f'[DRY RUN] Would submit stop loss: {symbol} {position_side} stop={stop_price:.4f} qty={quantity}')
+            return OrderResult(success=True, order_id=f'DRY_STOP_{int(time.time()*1000)}', executed_price=stop_price)
+        
+        try:
+            client = await self._get_client()
+            stop_price_str = self._round_price(symbol, stop_price)
+            qty_str = self._round_quantity(symbol, quantity)
+            
+            result = await client.futures_create_order(
+                symbol=symbol,
+                side='SELL' if position_side == 'LONG' else 'BUY',
+                type='STOP_MARKET',
+                stopPrice=stop_price_str,
+                quantity=qty_str,
+                positionSide=position_side,
+                closePosition='true'
+            )
+            
+            order_id = str(result.get('orderId', 'N/A'))
+            self._stop_orders[symbol] = order_id
+            logger.info(f'[STOP ORDER PLACED] {symbol} {position_side} stop={stop_price:.4f} ID={order_id}')
+            
+            return OrderResult(success=True, order_id=order_id, executed_price=stop_price)
+            
+        except Exception as e:
+            logger.error(f'[STOP ORDER FAILED] {symbol}: {e}')
+            return OrderResult(success=False, error_message=str(e))
+
+    async def update_stop_loss(self, symbol: str, position_side: str, 
+                              new_stop_price: float, quantity: float) -> bool:
+        logger.info(f'[UPDATE STOP] {symbol}: {position_side} new_stop={new_stop_price:.4f}')
+        
+        old_stop_id = self._stop_orders.get(symbol)
+        if old_stop_id:
+            cancel_success = await self.cancel_order(old_stop_id, symbol)
+            if cancel_success:
+                logger.info(f'[UPDATE STOP] {symbol}: Old stop {old_stop_id} canceled')
+            if symbol in self._stop_orders:
+                del self._stop_orders[symbol]
+        
+        result = await self.submit_stop_loss_order(symbol, position_side, new_stop_price, quantity)
+        return result.success
+
+    async def close_position(self, symbol: str, position) -> OrderResult:
+        stop_order_id = self._stop_orders.get(symbol)
+        if stop_order_id:
+            await self.cancel_order(stop_order_id, symbol)
+            if symbol in self._stop_orders:
+                del self._stop_orders[symbol]
+        
+        if self.dry_run:
+            logger.info(f'[DRY RUN] Would close position for {symbol}')
+            return OrderResult(success=True, order_id=f'DRY_CLOSE_{int(time.time()*1000)}')
+        
+        try:
+            client = await self._get_client()
+            close_side = 'SELL' if position.side == 'LONG' else 'BUY'
+            
+            result = await client.futures_create_order(
+                symbol=symbol,
+                side=close_side,
+                type='MARKET',
+                quantity=position.quantity,
+                positionSide=position.side
+            )
+            
+            order_id = result.get('orderId', 'N/A')
+            executed_price = float(result.get('avgPrice', position.current_price))
+            
+            logger.info(f'[CLOSE FILLED] {symbol} {position.side} ID={order_id} @ {executed_price}')
+            
+            return OrderResult(success=True, order_id=str(order_id), executed_price=executed_price, executed_quantity=position.quantity)
+            
+        except Exception as e:
+            logger.error(f'[CLOSE FAILED] {symbol}: {e}')
+            return OrderResult(success=False, error_message=str(e))
+
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+        if self.dry_run:
+            logger.info(f'[DRY RUN] Would cancel order {order_id} for {symbol}')
+            return True
+        
+        try:
+            client = await self._get_client()
+            await client.futures_cancel_order(symbol=symbol, orderId=int(order_id))
+            logger.info(f'[CANCEL] Order {order_id} canceled for {symbol}')
+            return True
+        except Exception as e:
+            logger.error(f'[CANCEL FAILED] {symbol}: {e}')
+            return False
