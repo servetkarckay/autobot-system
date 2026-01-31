@@ -106,7 +106,7 @@ class OrderManager:
             self._client = await AsyncClient.create(
                 api_key=api_key,
                 api_secret=api_secret,
-                testnet=settings.BINANCE_TESTNET
+                api_url=settings.BINANCE_BASE_URL
             )
             await self._load_symbol_filters()
         return self._client

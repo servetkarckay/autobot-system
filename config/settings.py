@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     MAX_STOP_LOSS_MULTIPLIER: float = 4.0
     
     # Trailing Stop Settings
-    TRAILING_STOP_ACTIVATION_PCT: float = 2.0  # Activate trailing at X% profit
+    TRAILING_STOP_ACTIVATION_PCT: float = 1.5  # Activate trailing at X% profit
     BREAK_EVEN_PCT: float = 2.0  # Move stop to entry at X% profit
     TRAILING_STOP_RATE: float = 0.5  # Move stop by X% per 1% additional profit
     
