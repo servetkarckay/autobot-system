@@ -265,6 +265,9 @@ class WebSocketCollector:
         
         # All symbols being tracked
         self._all_symbols: Set[str] = set()
+
+        # Kline interval for subscriptions
+        self._kline_interval: str = "1m"
         
         # Metrics
         self._latency_metrics = LatencyMetrics()
@@ -302,6 +305,7 @@ class WebSocketCollector:
     def subscribe_klines(self, symbols: list, interval: str = "1m"):
         """Subscribe to kline stream for symbols"""
         self._all_symbols.update(symbols)
+        self._kline_interval = interval  # Store the interval
         logger.info(f"Subscribing to klines for {len(symbols)} symbols (total: {len(self._all_symbols)})")
     
     def subscribe_trades(self, symbols: list):
@@ -341,7 +345,7 @@ class WebSocketCollector:
             )
             
             # Subscribe to klines and book ticker for this batch
-            conn.subscribe_klines(batch)
+            conn.subscribe_klines(batch, interval=self._kline_interval)
             conn.subscribe_book_ticker(batch)
             
             self._connections.append(conn)

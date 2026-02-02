@@ -1,5 +1,5 @@
 """
-AUTOBOT Execution Engine - Order Manager v1.4
+AUTOBOT Execution Engine - Order Manager v1.5
 Handles order submission, cancellation, and monitoring
 
 FIXES:
@@ -8,6 +8,7 @@ FIXES:
 - Added input validation
 - ADDED: Margin check before order submission
 - ADDED: Leverage setting via API
+- UPDATED: New Algo Order API (2025-12-09+) for STOP/TAKE_PROFIT/TRAILING_STOP
 """
 import logging
 import asyncio
@@ -16,6 +17,9 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
 import time
+import hmac
+import hashlib
+import aiohttp
 
 from binance import AsyncClient
 import websockets
@@ -33,6 +37,7 @@ class OrderResult:
     """Result of an order submission"""
     success: bool
     order_id: Optional[str] = None
+    algo_id: Optional[str] = None  # For algo orders
     error_message: Optional[str] = None
     executed_price: Optional[float] = None
     executed_quantity: Optional[float] = None
@@ -53,10 +58,13 @@ class OrderManager:
         self._symbol_filters: Dict[str, Dict] = {}
         self._hedge_mode = None
         self._leverage_set: Dict[str, bool] = {}
-        self._stop_orders: Dict[str, str] = {}  # symbol -> stop_order_id
+        self._stop_orders: Dict[str, str] = {}  # symbol -> algo_id
         self._user_data_stream_key: Optional[str] = None  # Binance listen key
         self._user_data_stream_task: Optional[asyncio.Task] = None  # Listener task
         self._execution_report_callbacks = []  # Callbacks for execution reports
+        self._api_key: Optional[str] = None
+        self._api_secret: Optional[str] = None
+        self._base_url: Optional[str] = None
         logger.info(f"OrderManager initialized (dry_run={dry_run}, leverage={settings.LEVERAGE}x)")
 
     async def set_leverage(self, symbol: str) -> bool:
@@ -64,25 +72,25 @@ class OrderManager:
         if self.dry_run:
             logger.info(f"[DRY RUN] Would set leverage for {symbol} to {settings.LEVERAGE}x")
             return True
-        
+
         if symbol in self._leverage_set:
             return True
-        
+
         try:
             client = await self._get_client()
             leverage = settings.LEVERAGE
-            
+
             # Rate limiter: wait before leverage change
             await rate_limiter.wait_if_needed("futures_change_leverage")
             result = await client.futures_change_leverage(
                 symbol=symbol,
                 leverage=leverage
             )
-            
+
             self._leverage_set[symbol] = True
             logger.info(f"[LEVERAGE] {symbol}: Set to {leverage}x on Binance")
             return True
-            
+
         except BinanceAPIException as e:
             logger.error(f"[LEVERAGE] Failed to set leverage for {symbol}: {e.code} - {e.message}")
             return False
@@ -103,12 +111,15 @@ class OrderManager:
             if not api_key or not api_secret:
                 raise ValueError("Binance API credentials not configured")
 
-            self._client = await AsyncClient.create(
+            self._api_key = api_key
+            self._api_secret = api_secret
+            self._base_url = settings.BINANCE_BASE_URL
+
+            self._client = AsyncClient(
                 api_key=api_key,
-                api_secret=api_secret,
-                api_url=settings.BINANCE_BASE_URL
+                api_secret=api_secret
             )
-            await self._load_symbol_filters()
+            self._client.API_URL = settings.BINANCE_BASE_URL
         return self._client
 
     async def _load_symbol_filters(self):
@@ -205,10 +216,10 @@ class OrderManager:
     async def submit_order(self, signal: TradeSignal, quantity: float,
                     price: Optional[float] = None) -> OrderResult:
         """Submit an order based on a trading signal"""
-        
+
         # Set leverage first
         await self.set_leverage(signal.symbol)
-        
+
         # Check margin before submitting order
         position_value = quantity * (price or 100.0)
         margin_ok, margin_msg = await self._check_margin_sufficient(signal.symbol, position_value)
@@ -284,78 +295,38 @@ class OrderManager:
                 error_message=str(e)
             )
 
-
-    async def close_position(self, symbol: str, position) -> OrderResult:
-        """Close an existing position"""
-        if self.dry_run:
-            logger.info(f"[DRY RUN] Would close position for {symbol}")
-            return OrderResult(success=True, order_id=f"DRY_CLOSE_{int(time.time() * 1000)}")
-        
-        try:
-            client = await self._get_client()
-            
-            # Determine side for closing (opposite of position side)
-            close_side = "SELL" if position.side == "LONG" else "BUY"
-            
-            # Rate limiter: wait before order submission
-            await rate_limiter.wait_if_needed("futures_create_order")
-            result = await client.futures_create_order(
-                symbol=symbol,
-                side=close_side,
-                type="MARKET",
-                quantity=position.quantity,
-                positionSide=position.side
-            )
-            
-            order_id = result.get("orderId", "N/A")
-            executed_price = float(result.get("avgPrice", position.current_price))
-            
-            logger.info(f"[CLOSE FILLED] {symbol} {position.side} ID={order_id} @ {executed_price}")
-            
-            return OrderResult(
-                success=True,
-                order_id=str(order_id),
-                executed_price=executed_price,
-                executed_quantity=position.quantity
-            )
-            
-        except Exception as e:
-            logger.error(f"[CLOSE FAILED] {symbol}: {e}")
-            return OrderResult(success=False, error_message=str(e))
-
-
     async def confirm_order_on_exchange(self, symbol: str, expected_quantity: float) -> bool:
         """Emirin Binance'da gerçekleştiğini doğrula"""
         if self.dry_run:
             logger.info(f"[DRY RUN] Would confirm order for {symbol}")
             return True
-        
+
         try:
             client = await self._get_client()
             # Rate limiter: wait before position query
             await rate_limiter.wait_if_needed("futures_position_information")
             positions = await client.futures_position_information(symbol=symbol)
-            
+
             for pos in positions:
                 if pos.get('symbol') == symbol:
                     amt = float(pos.get('positionAmt', 0))
                     if abs(amt) > 0.0000001:
                         logger.info(f"[ORDER CONFIRMED] {symbol}: Position confirmed on exchange, amount={amt}")
                         return True
-            
+
             logger.warning(f"[ORDER NOT FOUND] {symbol}: Order executed but position not found on exchange")
             return False
-            
+
         except Exception as e:
             logger.error(f"[ORDER CONFIRM ERROR] {symbol}: {e}")
             return False
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        """Cancel an open order"""
+        """Cancel a regular order"""
         if self.dry_run:
             logger.info(f"[DRY RUN] Would cancel order {order_id} for {symbol}")
             return True
-        
+
         try:
             client = await self._get_client()
             await client.futures_cancel_order(symbol=symbol, orderId=int(order_id))
@@ -378,36 +349,35 @@ class OrderManager:
             executed_quantity=quantity
         )
 
-
     async def get_open_positions(self, symbols: list[str]) -> dict[str, dict]:
         """Fetch current open positions from exchange for given symbols.
-        
+
         Args:
             symbols: List of symbols to fetch positions for
-            
+
         Returns:
             Dictionary mapping symbol to position data dict.
         """
         if self.dry_run:
             logger.debug(f"[DRY RUN] get_open_positions: Would fetch positions for {symbols}")
             return {}
-        
+
         try:
             client = await self._get_client()
             # Rate limiter: wait before position query
             await rate_limiter.wait_if_needed("futures_position_information")
             positions = await client.futures_position_information()
-            
+
             result = {}
             for pos in positions:
                 symbol = pos.get("symbol", "")
                 if symbol not in symbols:
                     continue
-                
+
                 position_amt = float(pos.get("positionAmt", 0))
                 if abs(position_amt) < 0.00000001:
                     continue
-                
+
                 result[symbol] = {
                     "positionAmt": position_amt,
                     "entryPrice": float(pos.get("entryPrice", 0)),
@@ -416,77 +386,260 @@ class OrderManager:
                     "updateTime": pos.get("updateTime", 0),
                 }
                 logger.debug(f"[POSITIONS] {symbol}: {position_amt}")
-            
+
             logger.info(f"[POSITIONS] Found {len(result)} open positions")
             return result
-            
+
         except Exception as e:
             logger.error(f"[POSITIONS] Error: {e}")
             return {}
 
-    async def submit_stop_loss_order(self, symbol: str, position_side: str, 
+    # ==================== ALGO ORDER API (NEW 2025-12-09+) ====================
+
+    async def _submit_algo_order(self, params: dict) -> dict:
+        """Submit an algo order using the new API endpoint"""
+        await self._get_client()
+
+        timestamp = int(time.time() * 1000)
+        params['timestamp'] = timestamp
+
+        # Build query string
+        query = '&'.join(f'{k}={v}' for k, v in params.items())
+
+        # Create signature
+        signature = hmac.new(
+            self._api_secret.encode(),
+            query.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        url = f'{self._base_url}/fapi/v1/algoOrder?{query}&signature={signature}'
+        headers = {'X-MBX-APIKEY': self._api_key}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, timeout=30) as response:
+                result = await response.json()
+                if response.status != 200:
+                    logger.error(f"[ALGO ORDER] Failed: {result}")
+                    raise Exception(f"Algo order failed: {result.get('msg', result)}")
+                return result
+
+    async def _cancel_algo_order(self, symbol: str, algo_id: str) -> bool:
+        """Cancel an algo order using the new API endpoint"""
+        await self._get_client()
+
+        timestamp = int(time.time() * 1000)
+        params = {
+            'symbol': symbol,
+            'algoId': algo_id,
+            'timestamp': timestamp
+        }
+
+        query = '&'.join(f'{k}={v}' for k, v in params.items())
+        signature = hmac.new(
+            self._api_secret.encode(),
+            query.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        url = f'{self._base_url}/fapi/v1/algoOrder?{query}&signature={signature}'
+        headers = {'X-MBX-APIKEY': self._api_key}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(url, headers=headers, timeout=30) as response:
+                result = await response.json()
+                if response.status != 200:
+                    logger.warning(f"[ALGO CANCEL] Failed: {result}")
+                    return False
+                return True
+
+    async def _get_open_algo_orders(self, symbol: str) -> list:
+        """Get open algo orders for a symbol"""
+        await self._get_client()
+
+        timestamp = int(time.time() * 1000)
+        query = f'symbol={symbol}&timestamp={timestamp}'
+        signature = hmac.new(
+            self._api_secret.encode(),
+            query.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        url = f'{self._base_url}/fapi/v1/openAlgoOrders?{query}&signature={signature}'
+        headers = {'X-MBX-APIKEY': self._api_key}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=30) as response:
+                if response.status != 200:
+                    logger.warning(f"[ALGO ORDERS] Failed to fetch: {await response.text()}")
+                    return []
+                return await response.json()
+
+    async def submit_stop_loss_order(self, symbol: str, position_side: str,
                                      stop_price: float, quantity: float) -> OrderResult:
+        """Submit a STOP_MARKET order using the new Algo Order API"""
         if self.dry_run:
             logger.info(f'[DRY RUN] Would submit stop loss: {symbol} {position_side} stop={stop_price:.4f} qty={quantity}')
-            return OrderResult(success=True, order_id=f'DRY_STOP_{int(time.time()*1000)}', executed_price=stop_price)
-        
+            return OrderResult(
+                success=True,
+                order_id=f'DRY_STOP_{int(time.time()*1000)}',
+                algo_id=f'DRY_ALGO_{int(time.time()*1000)}',
+                executed_price=stop_price
+            )
+
         try:
-            client = await self._get_client()
             stop_price_str = self._round_price(symbol, stop_price)
             qty_str = self._round_quantity(symbol, quantity)
-            
-            # Rate limiter: wait before order submission
-            await rate_limiter.wait_if_needed("futures_create_order")
-            result = await client.futures_create_order(
-                symbol=symbol,
-                side='SELL' if position_side == 'LONG' else 'BUY',
-                type='STOP_MARKET',
-                stopPrice=stop_price_str,
-                quantity=qty_str,
-                positionSide=position_side,
-                closePosition='true'
+
+            params = {
+                'algoType': 'CONDITIONAL',
+                'symbol': symbol,
+                'side': 'SELL' if position_side == 'LONG' else 'BUY',
+                'type': 'STOP_MARKET',
+                'quantity': qty_str,
+                'triggerPrice': stop_price_str,  # NEW: triggerPrice instead of stopPrice
+                'positionSide': position_side,
+                'workingType': 'CONTRACT_PRICE',
+            }
+
+            result = await self._submit_algo_order(params)
+
+            algo_id = str(result.get('algoId', 'N/A'))
+            self._stop_orders[symbol] = algo_id
+            logger.info(f'[STOP ORDER PLACED] {symbol} {position_side} stop={stop_price:.4f} AlgoId={algo_id}')
+
+            return OrderResult(
+                success=True,
+                order_id=algo_id,
+                algo_id=algo_id,
+                executed_price=stop_price
             )
-            
-            order_id = str(result.get('orderId', 'N/A'))
-            self._stop_orders[symbol] = order_id
-            logger.info(f'[STOP ORDER PLACED] {symbol} {position_side} stop={stop_price:.4f} ID={order_id}')
-            
-            return OrderResult(success=True, order_id=order_id, executed_price=stop_price)
-            
+
         except Exception as e:
             logger.error(f'[STOP ORDER FAILED] {symbol}: {e}')
             return OrderResult(success=False, error_message=str(e))
 
-    async def update_stop_loss(self, symbol: str, position_side: str, 
+    async def submit_take_profit_order(self, symbol: str, position_side: str,
+                                       tp_price: float, quantity: float) -> OrderResult:
+        """Submit a TAKE_PROFIT_MARKET order using the new Algo Order API"""
+        if self.dry_run:
+            logger.info(f'[DRY RUN] Would submit take profit: {symbol} {position_side} tp={tp_price:.4f} qty={quantity}')
+            return OrderResult(
+                success=True,
+                order_id=f'DRY_TP_{int(time.time()*1000)}',
+                algo_id=f'DRY_ALGO_{int(time.time()*1000)}',
+                executed_price=tp_price
+            )
+
+        try:
+            tp_price_str = self._round_price(symbol, tp_price)
+            qty_str = self._round_quantity(symbol, quantity)
+
+            params = {
+                'algoType': 'CONDITIONAL',
+                'symbol': symbol,
+                'side': 'SELL' if position_side == 'LONG' else 'BUY',
+                'type': 'TAKE_PROFIT_MARKET',
+                'quantity': qty_str,
+                'triggerPrice': tp_price_str,
+                'positionSide': position_side,
+                'workingType': 'CONTRACT_PRICE',
+            }
+
+            result = await self._submit_algo_order(params)
+
+            algo_id = str(result.get('algoId', 'N/A'))
+            logger.info(f'[TAKE PROFIT ORDER PLACED] {symbol} {position_side} tp={tp_price:.4f} AlgoId={algo_id}')
+
+            return OrderResult(
+                success=True,
+                order_id=algo_id,
+                algo_id=algo_id,
+                executed_price=tp_price
+            )
+
+        except Exception as e:
+            logger.error(f'[TAKE PROFIT ORDER FAILED] {symbol}: {e}')
+            return OrderResult(success=False, error_message=str(e))
+
+    async def submit_trailing_stop_order(self, symbol: str, position_side: str,
+                                         activate_price: float, callback_rate: float,
+                                         quantity: float) -> OrderResult:
+        """Submit a TRAILING_STOP_MARKET order using the new Algo Order API"""
+        if self.dry_run:
+            logger.info(f'[DRY RUN] Would submit trailing stop: {symbol} {position_side} activate={activate_price:.4f} callback={callback_rate}% qty={quantity}')
+            return OrderResult(
+                success=True,
+                order_id=f'DRY_TRAIL_{int(time.time()*1000)}',
+                algo_id=f'DRY_ALGO_{int(time.time()*1000)}',
+                executed_price=activate_price
+            )
+
+        try:
+            activate_price_str = self._round_price(symbol, activate_price)
+            qty_str = self._round_quantity(symbol, quantity)
+
+            params = {
+                'algoType': 'CONDITIONAL',
+                'symbol': symbol,
+                'side': 'SELL' if position_side == 'LONG' else 'BUY',
+                'type': 'TRAILING_STOP_MARKET',
+                'quantity': qty_str,
+                'activatePrice': activate_price_str,
+                'callbackRate': str(callback_rate),
+                'positionSide': position_side,
+                'workingType': 'CONTRACT_PRICE',
+            }
+
+            result = await self._submit_algo_order(params)
+
+            algo_id = str(result.get('algoId', 'N/A'))
+            logger.info(f'[TRAILING STOP ORDER PLACED] {symbol} {position_side} activate={activate_price:.4f} callback={callback_rate}% AlgoId={algo_id}')
+
+            return OrderResult(
+                success=True,
+                order_id=algo_id,
+                algo_id=algo_id,
+                executed_price=activate_price
+            )
+
+        except Exception as e:
+            logger.error(f'[TRAILING STOP ORDER FAILED] {symbol}: {e}')
+            return OrderResult(success=False, error_message=str(e))
+
+    async def update_stop_loss(self, symbol: str, position_side: str,
                               new_stop_price: float, quantity: float) -> bool:
+        """Update stop loss by canceling old and placing new"""
         logger.info(f'[UPDATE STOP] {symbol}: {position_side} new_stop={new_stop_price:.4f}')
-        
-        old_stop_id = self._stop_orders.get(symbol)
-        if old_stop_id:
-            cancel_success = await self.cancel_order(old_stop_id, symbol)
+
+        old_algo_id = self._stop_orders.get(symbol)
+        if old_algo_id:
+            cancel_success = await self._cancel_algo_order(symbol, old_algo_id)
             if cancel_success:
-                logger.info(f'[UPDATE STOP] {symbol}: Old stop {old_stop_id} canceled')
+                logger.info(f'[UPDATE STOP] {symbol}: Old stop {old_algo_id} canceled')
             if symbol in self._stop_orders:
                 del self._stop_orders[symbol]
-        
+
         result = await self.submit_stop_loss_order(symbol, position_side, new_stop_price, quantity)
         return result.success
 
     async def close_position(self, symbol: str, position) -> OrderResult:
-        stop_order_id = self._stop_orders.get(symbol)
-        if stop_order_id:
-            await self.cancel_order(stop_order_id, symbol)
+        """Close an existing position"""
+        # First cancel any associated algo orders
+        algo_id = self._stop_orders.get(symbol)
+        if algo_id:
+            await self._cancel_algo_order(symbol, algo_id)
             if symbol in self._stop_orders:
                 del self._stop_orders[symbol]
-        
+
         if self.dry_run:
             logger.info(f'[DRY RUN] Would close position for {symbol}')
             return OrderResult(success=True, order_id=f'DRY_CLOSE_{int(time.time()*1000)}')
-        
+
         try:
             client = await self._get_client()
             close_side = 'SELL' if position.side == 'LONG' else 'BUY'
-            
+
             # Rate limiter: wait before order submission
             await rate_limiter.wait_if_needed("futures_create_order")
             result = await client.futures_create_order(
@@ -496,61 +649,51 @@ class OrderManager:
                 quantity=position.quantity,
                 positionSide=position.side
             )
-            
+
             order_id = result.get('orderId', 'N/A')
             executed_price = float(result.get('avgPrice', position.current_price))
-            
+
             logger.info(f'[CLOSE FILLED] {symbol} {position.side} ID={order_id} @ {executed_price}')
-            
-            return OrderResult(success=True, order_id=str(order_id), executed_price=executed_price, executed_quantity=position.quantity)
-            
+
+            return OrderResult(
+                success=True,
+                order_id=str(order_id),
+                executed_price=executed_price,
+                executed_quantity=position.quantity
+            )
+
         except Exception as e:
             logger.error(f'[CLOSE FAILED] {symbol}: {e}')
             return OrderResult(success=False, error_message=str(e))
 
-    async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        if self.dry_run:
-            logger.info(f'[DRY RUN] Would cancel order {order_id} for {symbol}')
-            return True
-        
-        try:
-            client = await self._get_client()
-            await client.futures_cancel_order(symbol=symbol, orderId=int(order_id))
-            logger.info(f'[CANCEL] Order {order_id} canceled for {symbol}')
-            return True
-        except Exception as e:
-            logger.error(f'[CANCEL FAILED] {symbol}: {e}')
-            return False
+    # ==================== USER DATA STREAM ====================
 
-
-    # ==================== SEVIYE 2: USER DATA STREAM ====================
-    
     async def start_user_data_stream(self) -> bool:
         """Binance User Data Stream'i başlat - Real-time order updates"""
         if self.dry_run:
             logger.info("[DRY RUN] Would start User Data Stream")
             return True
-            
+
         try:
             client = await self._get_client()
             response = await client.futures_stream_get_listen_key()
             self._user_data_stream_key = response
             logger.info(f"[USER DATA STREAM] Listen key obtained: {self._user_data_stream_key[:20]}...")
-            
+
             # Start listener task
             self._user_data_stream_task = asyncio.create_task(self._user_data_stream_listener())
             # Start keep-alive task
             asyncio.create_task(self.keep_alive_listen_key())
             logger.info("[USER DATA STREAM] Listener task started")
             return True
-            
+
         except BinanceAPIException as e:
             logger.error(f"[USER DATA STREAM] Failed to get listen key: {e.code} - {e.message}")
             return False
         except Exception as e:
             logger.error(f"[USER DATA STREAM] Error: {e}")
             return False
-    
+
     async def stop_user_data_stream(self):
         """User Data Stream'i durdur"""
         if self._user_data_stream_task:
@@ -559,57 +702,57 @@ class OrderManager:
                 await self._user_data_stream_task
             except asyncio.CancelledError:
                 pass
-                
+
         if self._user_data_stream_key and self._client:
             try:
                 await self._client.futures_stream_close_listen_key(listenKey=self._user_data_stream_key)
                 logger.info("[USER DATA STREAM] Listen key closed")
             except Exception as e:
                 logger.warning(f"[USER DATA STREAM] Failed to close listen key: {e}")
-    
+
     async def _user_data_stream_listener(self):
         """Binance User Data Stream'den execution report dinle"""
         uri = f"wss://fstream.binance.com/ws/{self._user_data_stream_key}"
-        
+
         while True:
             try:
                 async with websockets.connect(uri) as ws:
                     logger.info("[USER DATA STREAM] Connected to Binance User Data Stream")
-                    
+
                     while True:
                         message = await ws.recv()
                         data = json.loads(message)
-                        
+
                         # Execution event'ini işle
                         if data.get('e') == 'ORDER_TRADE_UPDATE':
                             await self._handle_execution_report(data.get('o', {}))
-                            
+
                         # Account update
                         elif data.get('e') == 'ACCOUNT_UPDATE':
                             await self._handle_account_update(data.get('a', {}))
-                            
+
                         # Listen key expired (24 hours)
                         elif data.get('e') == 'listenKeyExpired':
                             logger.warning("[USER DATA STREAM] Listen key expired, refreshing...")
                             await self.stop_user_data_stream()
                             await self.start_user_data_stream()
-                            
+
             except websockets.exceptions.ConnectionClosed:
                 logger.warning("[USER DATA STREAM] Connection closed, reconnecting...")
                 await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"[USER DATA STREAM] Error: {e}")
                 await asyncio.sleep(10)
-    
+
     async def _handle_execution_report(self, order_data: dict):
         """Execution report'ini işle ve local state'i güncelle"""
         order_id = str(order_data.get('i'))
         symbol = order_data.get('s')
         order_status = order_data.get('X')
         execution_type = order_data.get('x')
-        
+
         logger.debug(f"[EXECUTION REPORT] {symbol} Order {order_id}: Status={order_status}, ExecType={execution_type}")
-        
+
         # Sadece önemli durumları işle
         if order_status in ['FILLED', 'PARTIALLY_FILLED', 'CANCELED', 'REJECTED', 'EXPIRED']:
             # Callback'leri çağır
@@ -618,28 +761,28 @@ class OrderManager:
                     await callback(order_data)
                 except Exception as e:
                     logger.error(f"[EXECUTION REPORT] Callback error: {e}")
-        
+
         # Filled emir için log
         if execution_type == 'TRADE':
             executed_qty = float(order_data.get('l', 0))
             executed_price = float(order_data.get('L', 0))
             logger.info(f"[ORDER FILLED] {symbol} {order_id}: {executed_qty} @ {executed_price}")
-    
+
     async def _handle_account_update(self, account_data: dict):
         """Account update'ini işle"""
         positions = account_data.get('P', [])
         for pos in positions:
             symbol = pos.get('s')
             position_amt = float(pos.get('pa', 0))
-            unrealized_pnl = float(up = pos.get('up', 0)) if 'up' in pos_data else 0
-            
+            unrealized_pnl = float(pos.get('up', 0)) if 'up' in pos else 0
+
             if abs(position_amt) > 0:
                 logger.debug(f"[ACCOUNT UPDATE] {symbol}: {position_amt} contracts, PnL: {unrealized_pnl}")
-    
+
     def on_execution_report(self, callback):
         """Execution report için callback ekle"""
         self._execution_report_callbacks.append(callback)
-        
+
     async def keep_alive_listen_key(self):
         """Listen key'i canlı tut (her 30 dakikada bir ping)"""
         while True:
