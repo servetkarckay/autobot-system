@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     LOG_FORMAT: str = "json"
     
     # ============ Trading Parameters ============
-    TRADING_SYMBOLS: list[str] = ["ZECUSDT"]
+    TRADING_SYMBOLS: list[str] = ["0GUSDT"]
     MAX_POSITIONS: int = 1
     MAX_POSITION_SIZE_USDT: float = 1000.0
     LEVERAGE: int = 10
