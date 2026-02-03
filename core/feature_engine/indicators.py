@@ -178,6 +178,13 @@ class IndicatorCalculator:
     def _calculate_stochastic(self, df: pd.DataFrame, k_period: int = 14, d_period: int = 3) -> tuple:
         """Calculate Stochastic with safety checks"""
         try:
+            # Validate input type
+            if not isinstance(df, pd.DataFrame):
+                return 50.0, 50.0
+            
+            if df.empty or len(df) < k_period:
+                return 50.0, 50.0
+                
             low_min = df["low"].rolling(window=k_period).min()
             high_max = df["high"].rolling(window=k_period).max()
 
@@ -196,10 +203,17 @@ class IndicatorCalculator:
     def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
         """Calculate ADX with comprehensive safety checks"""
         try:
+            # Validate input type
+            if not isinstance(df, pd.DataFrame):
+                return 20.0
+            
+            if df.empty or len(df) < period + 1:
+                return 20.0
+            
             # Clean input data
-            high = df["high"].replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(0)
-            low = df["low"].replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(0)
-            close = df["close"].replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(0)
+            high = df["high"].replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
+            low = df["low"].replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
+            close = df["close"].replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
 
             if ta is not None:
                 try:

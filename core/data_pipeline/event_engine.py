@@ -513,15 +513,12 @@ class TradingDecisionEngine:
             features['ema_20_above_ema_50'] = features.get('ema_20', 0) > features.get('ema_50', 0)
             
             # Calculate Bollinger Bands middle for combo rules
-            bb_result = ta.bbands(df["close"], length=20)
-            if bb_result is not None and not bb_result.empty:
-                df = pd.concat([df, bb_result], axis=1)
-                features['bb_middle'] = df['BBL_20_2.0'].iloc[-1] if 'BBL_20_2.0' in df else price
-            else:
-                features['bb_middle'] = price
-
+            # Bollinger Bands from safe IndicatorCalculator
+            features["bb_middle"] = safe_features.get("bb_middle", price)
             
-            features["activation_threshold"] = settings.ACTIVATION_THRESHOLD
+            # Calculate ema_20_above_ema_50 for trend rules
+            features["ema_20_above_ema_50"] = features.get("ema_20", 0) > features.get("ema_50", 0)
+            
             self._feature_cache[symbol] = features
             return features
 
