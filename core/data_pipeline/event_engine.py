@@ -14,7 +14,9 @@ from collections import defaultdict
 
 from core.data_pipeline.websocket_collector import WebSocketCollector, MarketData, LatencyMetrics
 from core.data_pipeline.data_validator import DataValidator
+from core.metadata.static_metadata_engine import StaticMetadataEngine
 from core.feature_engine.incremental_indicators import IncrementalIndicatorCalculator, IncrementalEMA
+from core.feature_engine.indicators import IndicatorCalculator
 from core.feature_engine.regime_detector import RegimeDetector
 from core.decision.rule_engine import RuleEngine
 from core.decision.bias_generator import BiasAggregator
@@ -64,6 +66,9 @@ class TradingDecisionEngine:
 
         # Execution
         self.order_manager = OrderManager(dry_run=settings.is_dry_run)
+        
+        # Metadata engine for exchange rules
+        self.metadata_engine = StaticMetadataEngine()
 
         # System state
         self._state: Optional[SystemState] = None
@@ -482,47 +487,21 @@ class TradingDecisionEngine:
                 full_data=df  # Provide the full dataframe for non-incremental indicators
             )
             
-            # --- This part can be expanded in IncrementalIndicatorCalculator ---
-            # For now, manually add other indicators needed by strategies
-            import pandas_ta as ta
+            # Use safe IndicatorCalculator (replaces unreliable pandas_ta)
+            safe_calc = IndicatorCalculator()
+            safe_features = safe_calc.calculate_all(df)
             
-            # Calculate ADX
-            adx_result = ta.adx(df["high"], df["low"], df["close"], length=14)
-            if adx_result is not None and not adx_result.empty:
-                df = pd.concat([df, adx_result], axis=1)
-                features["adx"] = df["ADX_14"].iloc[-1] if "ADX_14" in df else 25
-            else:
-                features["adx"] = 25  # Default ADX value
+            # Merge features (safe calculator provides all indicators)
+            for k, v in safe_features.items():
+                if k not in features:
+                    features[k] = v
             
-            # Calculate ATR  
-            atr_result = ta.atr(df["high"], df["low"], df["close"], length=14)
-            if atr_result is not None and not atr_result.empty:
-                df["ATRr_14"] = atr_result
-                features["atr"] = df["ATRr_14"].iloc[-1] if "ATRr_14" in df else df["close"].iloc[-1] * 0.02
-            else:
-                features["atr"] = df["close"].iloc[-1] * 0.02
-            
-
-            # Calculate RSI
-            try:
-                rsi_result = ta.rsi(df["close"], length=14)
-                if rsi_result is not None and not rsi_result.empty:
-                    df["RSI_14"] = rsi_result
-                    features["rsi"] = float(df["RSI_14"].iloc[-1])
-                else:
-                    features["rsi"] = 50.0
-            except Exception as e:
-                features["rsi"] = 50.0
-
-            # Calculate Donchian channels manually
-            df["DCU_20_20"] = df["high"].rolling(window=20).max()
-            df["DCL_20_20"] = df["low"].rolling(window=20).min()
-            features["high_20"] = df["DCU_20_20"].iloc[-1] if len(df) >= 20 else 0.0
-            features["low_20"] = df["DCL_20_20"].iloc[-1] if len(df) >= 20 else 0.0
-            logger.debug(f"[DONCHIAN] {symbol}: high_20={features.get('high_20', 0):.2f}, low_20={features.get('low_20', 0):.2f}")
-            features["breakout_20_long"] = price > df.iloc[-2]["DCU_20_20"] if len(df) >= 2 else False
-            features["breakout_20_short"] = price < df.iloc[-2]["DCL_20_20"] if len(df) >= 2 else False
+            # Add breakout detection
+            features['breakout_20_long'] = price > features.get('high_20', 0)
+            features['breakout_20_short'] = price < features.get('low_20', 0)
+            logger.debug(f'[FEATURES] {symbol}: safe_calc - adx={features.get("adx", 0):.1f}')
             # ---
+
 
             # Merge incremental calculator results (uppercase keys to lowercase)
             if 'EMA_20' in features:

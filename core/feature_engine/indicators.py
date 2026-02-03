@@ -14,10 +14,12 @@ from typing import Dict, Any, Optional
 import numpy as np
 import pandas as pd
 
-try:
-    # import pandas_ta as ta  # Temporarily disabled
-except ImportError:
-    ta = None
+# pandas_ta temporarily disabled due to import issues
+# try:
+#     import pandas_ta as ta
+# except ImportError:
+#     ta = None
+ta = None
 
 logger = logging.getLogger("autobot.feature.indicators")
 
