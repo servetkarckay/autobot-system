@@ -1,24 +1,22 @@
 """
-AUTOBOT Feature Engine - Technical Indicators v1.3
-Calculates technical indicators from OHLCV data
+AUTOBOT Feature Engine - Technical Indicators v1.4
+FIXED: Added stricter type checking to prevent float errors
 
 FIXES:
 - Added comprehensive NaN/Infinity protection
 - Added safe division operations
 - Added input validation for all indicators
 - Improved ADX calculation safety
+- Fixed: Changed method signatures to take DataFrame instead of Series
+- Fixed: Added explicit Series type validation in all methods
 """
 import logging
 import math
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 import numpy as np
 import pandas as pd
 
 # pandas_ta temporarily disabled due to import issues
-# try:
-#     import pandas_ta as ta
-# except ImportError:
-#     ta = None
 ta = None
 
 logger = logging.getLogger("autobot.feature.indicators")
@@ -69,6 +67,11 @@ class IndicatorCalculator:
 
     def calculate_all(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Calculate all technical indicators with safety checks"""
+        # CRITICAL: Validate input is actually a DataFrame
+        if not isinstance(df, pd.DataFrame):
+            logger.error(f"calculate_all: Expected DataFrame, got {type(df).__name__}")
+            return {}
+
         if df is None or df.empty or len(df) < 55:
             logger.warning(f"Insufficient data: {len(df) if df is not None else 0} bars (need 55)")
             return {}
@@ -85,8 +88,10 @@ class IndicatorCalculator:
 
             # Clean data - remove NaN/Inf
             df_clean = df.replace([np.inf, -np.inf], np.nan).dropna(subset=required_cols)
-            if len(df_clean) < 55:
-                logger.warning(f"Insufficient clean data: {len(df_clean)} bars")
+
+            # CRITICAL: Validate df_clean is still a DataFrame after cleaning
+            if not isinstance(df_clean, pd.DataFrame) or df_clean.empty or len(df_clean) < 55:
+                logger.warning(f"Insufficient clean data: {len(df_clean) if isinstance(df_clean, pd.DataFrame) else 0} bars")
                 return {}
 
             # TURTLE TRADING BREAKOUT LEVELS
@@ -113,14 +118,14 @@ class IndicatorCalculator:
                 indicators["high_55"] = indicators["low_55"] = 0.0
                 indicators["close"] = 0.0
 
-            # MOMENTUM INDICATORS
-            indicators["rsi"] = self._calculate_rsi(df_clean["close"])
+            # MOMENTUM INDICATORS - Pass df_clean (DataFrame), not Series
+            indicators["rsi"] = self._calculate_rsi(df_clean)
             indicators["stoch_k"], indicators["stoch_d"] = self._calculate_stochastic(df_clean)
 
-            # TREND INDICATORS
+            # TREND INDICATORS - Pass df_clean (DataFrame)
             indicators["adx"] = self._calculate_adx(df_clean)
-            indicators["ema_20"] = self._calculate_ema(df_clean["close"], 20)
-            indicators["ema_50"] = self._calculate_ema(df_clean["close"], 50)
+            indicators["ema_20"] = self._calculate_ema(df_clean, 20)
+            indicators["ema_50"] = self._calculate_ema(df_clean, 50)
             indicators["ema_20_above_ema_50"] = indicators["ema_20"] > indicators["ema_50"]
 
             # VOLATILITY INDICATORS
@@ -157,19 +162,29 @@ class IndicatorCalculator:
             logger.error(f"Error in calculate_all: {e}", exc_info=True)
             return {}
 
-    def _calculate_rsi(self, close: pd.Series, period: int = 14) -> float:
-        """Calculate RSI with safety checks"""
+    def _calculate_rsi(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate RSI with safety checks - FIXED: Takes DataFrame, not Series"""
         try:
+            # Validate input
+            if not isinstance(df, pd.DataFrame) or df.empty or 'close' not in df.columns:
+                return 50.0
+
+            close = df['close']
+
+            # Validate close is a Series
+            if not isinstance(close, pd.Series):
+                return 50.0
+
             if ta is not None:
                 rsi_series = ta.rsi(close, length=period)
                 return self._safe_series_to_float(rsi_series, default=50.0)
 
-            # Fallback calculation
+            # Fallback calculation - FIXED: Use pandas division
             delta = close.diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-            rs = self._safe_divide(gain, loss, default=1.0)
-            rsi = 100 - self._safe_divide(100, 1 + rs, default=50.0)
+            rs = gain.div(loss, fill_value=1.0)
+            rsi = 100 - (100 / (1 + rs))
             return self._safe_series_to_float(rsi, default=50.0)
         except Exception as e:
             logger.error(f"RSI calculation error: {e}")
@@ -178,42 +193,71 @@ class IndicatorCalculator:
     def _calculate_stochastic(self, df: pd.DataFrame, k_period: int = 14, d_period: int = 3) -> tuple:
         """Calculate Stochastic with safety checks"""
         try:
-            # Validate input type
+            # CRITICAL: Validate input type - must be DataFrame
             if not isinstance(df, pd.DataFrame):
+                logger.error(f"_calculate_stochastic: Expected DataFrame, got {type(df).__name__}")
                 return 50.0, 50.0
-            
+
             if df.empty or len(df) < k_period:
                 return 50.0, 50.0
-                
-            low_min = df["low"].rolling(window=k_period).min()
-            high_max = df["high"].rolling(window=k_period).max()
+
+            # Validate required columns exist
+            if 'low' not in df.columns or 'high' not in df.columns or 'close' not in df.columns:
+                logger.error(f"_calculate_stochastic: Missing columns in DataFrame")
+                return 50.0, 50.0
+
+            # Get columns as Series
+            low = df['low']
+            high = df['high']
+            close = df['close']
+
+            # CRITICAL: Validate columns are Series, not scalars
+            if not isinstance(low, pd.Series) or not isinstance(high, pd.Series) or not isinstance(close, pd.Series):
+                logger.error(f"_calculate_stochastic: Columns are not Series (low={type(low).__name__}, high={type(high).__name__}, close={type(close).__name__})")
+                return 50.0, 50.0
+
+            low_min = low.rolling(window=k_period).min()
+            high_max = high.rolling(window=k_period).max()
 
             range_val = high_max - low_min
-            k = self._safe_divide(
-                100 * (df["close"] - low_min),
-                range_val,
-                default=50.0
-            )
+            # FIXED: Use pandas division instead of _safe_divide for Series
+            k = (100 * (close - low_min)).div(range_val, fill_value=50.0)
             d = k.rolling(window=d_period).mean()
             return self._safe_series_to_float(k, default=50.0), self._safe_series_to_float(d, default=50.0)
         except Exception as e:
-            logger.error(f"Stochastic calculation error: {e}")
+            logger.error(f"Stochastic calculation error: {e}", exc_info=True)
             return 50.0, 50.0
 
     def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
-        """Calculate ADX with comprehensive safety checks"""
+        """Calculate ADX with comprehensive safety checks - FIXED"""
         try:
-            # Validate input type
+            # CRITICAL: Validate input type
             if not isinstance(df, pd.DataFrame):
+                logger.error(f"_calculate_adx: Expected DataFrame, got {type(df).__name__}")
                 return 20.0
-            
+
             if df.empty or len(df) < period + 1:
                 return 20.0
-            
-            # Clean input data
-            high = df["high"].replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
-            low = df["low"].replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
-            close = df["close"].replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
+
+            # Validate required columns
+            if 'high' not in df.columns or 'low' not in df.columns or 'close' not in df.columns:
+                logger.error(f"_calculate_adx: Missing columns in DataFrame")
+                return 20.0
+
+            # Get columns as Series
+            high = df['high']
+            low = df['low']
+            close = df['close']
+
+            # CRITICAL: Validate they are Series, not scalars
+            if not isinstance(high, pd.Series) or not isinstance(low, pd.Series) or not isinstance(close, pd.Series):
+                logger.error(f"_calculate_adx: Columns are not Series (high={type(high).__name__}, low={type(low).__name__}, close={type(close).__name__})")
+                return 20.0
+
+            # Clean input data - only call replace on Series, not scalars
+            high = high.replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
+            low = low.replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
+            close = close.replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
 
             if ta is not None:
                 try:
@@ -238,27 +282,17 @@ class IndicatorCalculator:
 
             atr = tr.rolling(window=period).mean()
 
-            # Safe division for DI calculation
+            # Safe division for DI calculation - FIXED: Use pandas division
+            plus_di_mean = plus_dm.rolling(window=period).mean()
+            minus_di_mean = minus_dm.rolling(window=period).mean()
             atr_safe = atr.replace(0, np.nan)
-            plus_di = self._safe_divide(
-                100 * plus_dm.rolling(window=period).mean(),
-                atr_safe,
-                default=0.0
-            )
-            minus_di = self._safe_divide(
-                100 * minus_dm.rolling(window=period).mean(),
-                atr_safe,
-                default=0.0
-            )
+            plus_di = (100 * plus_di_mean).div(atr_safe, fill_value=0.0)
+            minus_di = (100 * minus_di_mean).div(atr_safe, fill_value=0.0)
 
-            # Safe DX calculation
+            # Safe DX calculation - FIXED: Use pandas division
             di_sum = plus_di + minus_di
             di_sum_safe = di_sum.replace(0, np.nan)
-            dx = self._safe_divide(
-                100 * (plus_di - minus_di).abs(),
-                di_sum_safe,
-                default=0.0
-            )
+            dx = (100 * (plus_di - minus_di).abs()).div(di_sum_safe, fill_value=0.0)
 
             adx = dx.rolling(window=period).mean()
             adx_val = self._safe_series_to_float(adx, default=20.0)
@@ -271,12 +305,19 @@ class IndicatorCalculator:
             return min(adx_val, 100.0)
 
         except Exception as e:
-            logger.error(f"ADX calculation error: {e}")
+            logger.error(f"ADX calculation error: {e}", exc_info=True)
             return 20.0
 
-    def _calculate_ema(self, close: pd.Series, period: int) -> float:
-        """Calculate EMA with safety checks"""
+    def _calculate_ema(self, df: pd.DataFrame, period: int = 20) -> float:
+        """Calculate EMA with safety checks - FIXED: Takes DataFrame"""
         try:
+            if not isinstance(df, pd.DataFrame) or df.empty or 'close' not in df.columns:
+                return 0.0
+
+            close = df['close']
+            if not isinstance(close, pd.Series):
+                return 0.0
+
             ema = close.ewm(span=period, adjust=False).mean()
             return self._safe_series_to_float(ema, default=0.0)
         except Exception as e:
@@ -284,8 +325,14 @@ class IndicatorCalculator:
             return 0.0
 
     def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
-        """Calculate ATR with safety checks"""
+        """Calculate ATR with safety checks - FIXED: Takes DataFrame"""
         try:
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                return 0.0
+
+            if not all(col in df.columns for col in ['high', 'low', 'close']):
+                return 0.0
+
             high_low = df["high"] - df["low"]
             high_close = (df["high"] - df["close"].shift()).abs()
             low_close = (df["low"] - df["close"].shift()).abs()
@@ -299,10 +346,17 @@ class IndicatorCalculator:
             return 0.0
 
     def _calculate_bollinger_bands(self, df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) -> tuple:
-        """Calculate Bollinger Bands with safety checks"""
+        """Calculate Bollinger Bands with safety checks - FIXED: Takes DataFrame"""
         try:
-            sma = df["close"].rolling(window=period).mean()
-            std = df["close"].rolling(window=period).std()
+            if not isinstance(df, pd.DataFrame) or df.empty or 'close' not in df.columns:
+                return 0.0, 0.0, 0.0
+
+            close = df['close']
+            if not isinstance(close, pd.Series):
+                return 0.0, 0.0, 0.0
+
+            sma = close.rolling(window=period).mean()
+            std = close.rolling(window=period).std()
 
             upper = sma + (std * std_dev)
             lower = sma - (std * std_dev)

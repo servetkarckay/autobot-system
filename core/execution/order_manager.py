@@ -115,7 +115,7 @@ class OrderManager:
             self._api_secret = api_secret
             self._base_url = settings.BINANCE_BASE_URL
 
-            self._client = AsyncClient(
+            self._client = AsyncClient(testnet=True, 
                 api_key=api_key,
                 api_secret=api_secret
             )
