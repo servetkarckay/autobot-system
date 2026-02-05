@@ -52,11 +52,11 @@ class Settings(BaseSettings):
     # ============ System Configuration ============
     ENVIRONMENT: Literal["DRY_RUN", "TESTNET", "LIVE"] = "TESTNET"
     DRY_RUN: bool = False
-    LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "DEBUG"
     LOG_FORMAT: str = "json"
     
     # ============ Trading Parameters ============
-    TRADING_SYMBOLS: list[str] = ["0GUSDT"]
+    TRADING_SYMBOLS: list[str] = ["ZECUSDT"]
     MAX_POSITIONS: int = 1
     MAX_POSITION_SIZE_USDT: float = 1000.0
     LEVERAGE: int = 10

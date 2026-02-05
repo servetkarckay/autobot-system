@@ -37,6 +37,10 @@ def setup_logging(name: str = "autobot") -> logging.Logger:
     """Set up structured logging for the application"""
     
     logger = logging.getLogger(name)
+    # Set up child loggers with same level
+    for child in ["autobot.feature.indicators", "autobot.data", "autobot.decision"]:
+        child_logger = logging.getLogger(child)
+        child_logger.setLevel(getattr(logging, settings.LOG_LEVEL))
     logger.setLevel(getattr(logging, settings.LOG_LEVEL))
     
     # Remove existing handlers
@@ -44,6 +48,7 @@ def setup_logging(name: str = "autobot") -> logging.Logger:
     
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(getattr(logging, settings.LOG_LEVEL))
     
     if settings.LOG_FORMAT == "json":
         formatter = JsonFormatter(
@@ -62,6 +67,7 @@ def setup_logging(name: str = "autobot") -> logging.Logger:
     # File handler (always in JSON format for parsing)
     os.makedirs("logs", exist_ok=True)
     file_handler = logging.FileHandler("logs/autobot.log")
+    file_handler.setLevel(getattr(logging, settings.LOG_LEVEL))
     file_formatter = JsonFormatter(
         "%(timestamp)s %(level)s %(logger)s %(message)s"
     )

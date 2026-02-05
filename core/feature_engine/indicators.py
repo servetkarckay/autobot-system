@@ -121,17 +121,22 @@ class IndicatorCalculator:
             # MOMENTUM INDICATORS - Pass df_clean (DataFrame), not Series
             indicators["rsi"] = self._calculate_rsi(df_clean)
             indicators["stoch_k"], indicators["stoch_d"] = self._calculate_stochastic(df_clean)
+            logger.debug(f"[INDICATOR] RSI: {indicators["rsi"]:.2f}")
 
+            logger.debug(f"[INDICATOR] Stoch K: {indicators["stoch_k"]:.2f}, D: {indicators["stoch_d"]:.2f}")
             # TREND INDICATORS - Pass df_clean (DataFrame)
             indicators["adx"] = self._calculate_adx(df_clean)
             indicators["ema_20"] = self._calculate_ema(df_clean, 20)
+            logger.debug(f"[INDICATOR] ADX: {indicators["adx"]:.2f}")
             indicators["ema_50"] = self._calculate_ema(df_clean, 50)
             indicators["ema_20_above_ema_50"] = indicators["ema_20"] > indicators["ema_50"]
+            logger.debug(f"[INDICATOR] EMA20: {indicators["ema_20"]:.4f}, EMA50: {indicators["ema_50"]:.4f}, Above: {indicators["ema_20_above_ema_50"]}")
 
             # VOLATILITY INDICATORS
             indicators["atr"] = self._calculate_atr(df_clean)
             indicators["atr_pct"] = self._safe_divide(indicators["atr"], indicators["close"], 0.0) * 100
 
+            logger.debug(f"[INDICATOR] ATR: {indicators["atr"]:.4f}, ATR%: {indicators["atr_pct"]:.2f}%")
             indicators["bb_upper"], indicators["bb_middle"], indicators["bb_lower"] = self._calculate_bollinger_bands(df_clean)
             if self._is_valid_numeric(indicators["bb_middle"], allow_zero=False):
                 indicators["bb_width"] = self._safe_divide(
@@ -177,7 +182,13 @@ class IndicatorCalculator:
 
             if ta is not None:
                 rsi_series = ta.rsi(close, length=period)
-                return self._safe_series_to_float(rsi_series, default=50.0)
+                # Check if RSI calculation produced valid values
+                if rsi_series is not None and len(rsi_series) > 0:
+                    last_rsi = rsi_series.iloc[-1]
+                    if pd.notna(last_rsi) and self._is_valid_numeric(last_rsi):
+                        return float(last_rsi)
+                # Fall through to manual calculation if ta.rsi failed
+                logger.debug(f"ta.rsi produced invalid values, using fallback calculation")
 
             # Fallback calculation - FIXED: Use pandas division
             delta = close.diff()
@@ -185,7 +196,12 @@ class IndicatorCalculator:
             loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
             rs = gain.div(loss, fill_value=1.0)
             rsi = 100 - (100 / (1 + rs))
-            return self._safe_series_to_float(rsi, default=50.0)
+            # Direct NaN check on final RSI value
+            if len(rsi) > 0:
+                final_rsi = rsi.iloc[-1]
+                if pd.notna(final_rsi) and self._is_valid_numeric(final_rsi):
+                    return float(final_rsi)
+            return 50.0  # Default if all calculations failed
         except Exception as e:
             logger.error(f"RSI calculation error: {e}")
             return 50.0
