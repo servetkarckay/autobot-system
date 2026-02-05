@@ -267,7 +267,7 @@ class WebSocketCollector:
         self._all_symbols: Set[str] = set()
 
         # Kline interval for subscriptions
-        self._kline_interval: str = "1m"
+        self._kline_interval: str = "12h"
         
         # Metrics
         self._latency_metrics = LatencyMetrics()

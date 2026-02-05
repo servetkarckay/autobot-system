@@ -1,50 +1,40 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.class
 *.so
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual Environment
 venv/
-ENV/
 env/
+ENV/
+*.egg-info/
+dist/
+build/
 
-# Environment variables
+# Environment
 .env
 .env.local
 
-# IDEs
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
 # Logs
-logs/
 *.log
+logs/
 
 # Data
-data/*.csv
-data/*.json
 data/metadata/*.json
 !data/metadata/.gitkeep
+
+# PM2
+.pm2/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Redis
+dump.rdb
