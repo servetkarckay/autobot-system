@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     LOG_FORMAT: str = "json"
     
     # ============ Trading Parameters ============
-    TRADING_SYMBOLS: list[str] = ["ZECUSDT"]
+    TRADING_SYMBOLS: list[str] = ["BTRUSDT"]
     MAX_POSITIONS: int = 1
     MAX_POSITION_SIZE_USDT: float = 1000.0
     LEVERAGE: int = 10
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # ============ Risk Parameters ============
     STOP_LOSS_ATR_MULTIPLIER: float = 2.5
     TRAILING_STOP_ATR_MULTIPLIER: float = 2.0
-    ACTIVATION_THRESHOLD: float = 0.7
+    ACTIVATION_THRESHOLD: float = 0.3
     CORRELATION_THRESHOLD: float = 0.8
     MAX_CORRELATION_EXPOSURE_PCT: float = 3.0
     

@@ -140,19 +140,12 @@ class OrderManager:
             logger.warning(f"Invalid quantity for rounding: {quantity}")
             return "0.001"
 
-        if symbol not in self._symbol_filters:
-            return f"{quantity:.3f}".rstrip("0").rstrip(".")
-
-        lot_size = self._symbol_filters[symbol].get("LOT_SIZE", {})
-        if lot_size:
-            step_size = float(lot_size.get("stepSize", "0.001"))
-            precision = 0
-            if step_size < 1:
-                precision = len(str(step_size).split(".")[-1].rstrip("0"))
-            rounded = int(quantity / step_size) * step_size
-            return f"{rounded:.{precision}f}".rstrip("0").rstrip(".")
-
-        return f"{quantity:.3f}".rstrip("0").rstrip(".")
+        # Critical: Always use integer rounding for USDT pairs to avoid precision errors
+        # Most symbols require whole numbers, fractional quantities often cause API Error -1111
+        qty_int = int(quantity)
+        if qty_int < 1:
+            qty_int = 1
+        return str(qty_int)
 
     def _round_price(self, symbol: str, price: float) -> str:
         """Round price to symbol's precision rules"""
@@ -179,7 +172,7 @@ class OrderManager:
             client = await self._get_client()
             # Rate limiter: wait before account query
             await rate_limiter.wait_if_needed("futures_account")
-            account = await client.get_account()
+            account = await client.futures_account()
 
             # Get USDT available balance
             available_balance = 0.0
@@ -248,6 +241,24 @@ class OrderManager:
 
         try:
             client = await self._get_client()
+
+            # CRITICAL FIX: Cancel any existing open orders for this symbol before placing new one
+            # This prevents accumulation of unfilled LIMIT orders
+            try:
+                await rate_limiter.wait_if_needed("futures_get_open_orders")
+                open_orders = await client.futures_get_open_orders(symbol=signal.symbol)
+                if open_orders:
+                    logger.warning(f"[CANCEL PREVIOUS ORDERS] {signal.symbol}: Found {len(open_orders)} open orders, canceling...")
+                    for order in open_orders:
+                        order_id = order.get('orderId')
+                        if order_id:
+                            await client.futures_cancel_order(symbol=signal.symbol, orderId=order_id)
+                            logger.info(f"[CANCEL PREVIOUS ORDERS] {signal.symbol}: Canceled order {order_id}")
+                    # Wait a bit for cancellations to process
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"[CANCEL PREVIOUS ORDERS] {signal.symbol}: Error canceling orders: {e}")
+
             qty_str = self._round_quantity(signal.symbol, quantity)
 
             logger.info(f"Submitting {order_type} order: {signal.symbol} {signal.action} qty={qty_str}")
@@ -275,6 +286,30 @@ class OrderManager:
 
             logger.info(f"Order FILLED: {signal.symbol} {side} {position_side} ID={order_id} @ {executed_price}")
 
+            # Auto-place stop loss after successful order fill
+            try:
+                # Calculate stop loss price (5% from entry for safety)
+                if position_side == "LONG":
+                    stop_price = executed_price * 0.95  # 5% below entry
+                else:  # SHORT
+                    stop_price = executed_price * 1.05  # 5% above entry
+                
+                stop_result = await self.submit_stop_loss_order(
+                    symbol=signal.symbol,
+                    position_side=position_side,
+                    stop_price=stop_price,
+                    quantity=executed_qty
+                )
+                
+                if stop_result.success:
+                    logger.info(f"[STOP LOSS PLACED] {signal.symbol} {position_side} @ {stop_price}")
+                else:
+                    logger.warning(f"[STOP LOSS FAILED] {signal.symbol}: {stop_result.error_message}")
+                    logger.warning(f"MANUAL STOP LOSS REQUIRED! Position: {signal.symbol} {position_side} {executed_qty} @ {executed_price}")
+            except Exception as e:
+                logger.error(f"[STOP LOSS ERROR] {signal.symbol}: {e}")
+                logger.warning(f"MANUAL STOP LOSS REQUIRED! Position: {signal.symbol} {position_side}")
+            
             return OrderResult(
                 success=True,
                 order_id=str(order_id),
